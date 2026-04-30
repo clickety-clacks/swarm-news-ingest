@@ -1,0 +1,188 @@
+# Swarm.channel News v0 sources
+# Created: 2026-04-29 03:03 PDT
+# Scope: local-only ingestion implementation seed config. No live publish.
+
+sources:
+  - id: openai
+    name: OpenAI
+    source_class: official
+    source_category: official_lab
+    feed_type: rss
+    feed_url: https://openai.com/news/rss.xml
+    site_url: https://openai.com/news
+    enabled: true
+    tier: 1
+    freshness_window_hours: 72
+    adapter: generic_rss
+    request_headers: {}
+    notes: Official OpenAI news RSS.
+
+  - id: google_deepmind
+    name: Google DeepMind
+    source_class: official
+    source_category: official_lab
+    feed_type: rss
+    feed_url: https://deepmind.google/blog/rss.xml
+    site_url: https://deepmind.google/blog
+    enabled: true
+    tier: 1
+    freshness_window_hours: 72
+    adapter: generic_rss
+    request_headers: {}
+    notes: Official Google DeepMind blog RSS.
+
+  - id: google_ai
+    name: Google AI
+    source_class: official
+    source_category: official_lab
+    feed_type: rss
+    feed_url: https://blog.google/innovation-and-ai/technology/ai/rss/
+    site_url: https://blog.google/technology/ai/
+    enabled: true
+    tier: 1
+    freshness_window_hours: 72
+    adapter: generic_rss
+    request_headers: {}
+    notes: Google AI category feed.
+
+  - id: huggingface
+    name: Hugging Face
+    source_class: official
+    source_category: official_platform
+    feed_type: rss
+    feed_url: https://huggingface.co/blog/feed.xml
+    site_url: https://huggingface.co/blog
+    enabled: true
+    tier: 1
+    freshness_window_hours: 96
+    adapter: generic_rss
+    request_headers: {}
+    notes: Hugging Face official blog feed.
+
+  - id: arxiv_cs_ai
+    name: arXiv cs.AI
+    source_class: research
+    source_category: research_arxiv
+    feed_type: arxiv_atom
+    feed_url: https://export.arxiv.org/api/query?search_query=cat:cs.AI&sortBy=submittedDate&sortOrder=descending&max_results=5
+    site_url: https://arxiv.org/list/cs.AI/recent
+    enabled: true
+    tier: 1
+    freshness_window_hours: 120
+    adapter: arxiv_atom
+    request_headers: {}
+    notes: Recent AI papers.
+
+  - id: arxiv_cs_cl
+    name: arXiv cs.CL
+    source_class: research
+    source_category: research_arxiv
+    feed_type: arxiv_atom
+    feed_url: https://export.arxiv.org/api/query?search_query=cat:cs.CL&sortBy=submittedDate&sortOrder=descending&max_results=5
+    site_url: https://arxiv.org/list/cs.CL/recent
+    enabled: true
+    tier: 1
+    freshness_window_hours: 120
+    adapter: arxiv_atom
+    request_headers: {}
+    notes: Recent computational linguistics / language model papers.
+
+  - id: arxiv_cs_lg
+    name: arXiv cs.LG
+    source_class: research
+    source_category: research_arxiv
+    feed_type: arxiv_atom
+    feed_url: https://export.arxiv.org/api/query?search_query=cat:cs.LG&sortBy=submittedDate&sortOrder=descending&max_results=5
+    site_url: https://arxiv.org/list/cs.LG/recent
+    enabled: true
+    tier: 1
+    freshness_window_hours: 120
+    adapter: arxiv_atom
+    request_headers: {}
+    notes: Recent machine learning papers.
+
+  - id: the_decoder
+    name: The Decoder
+    source_class: editorial
+    source_category: trusted_editorial
+    feed_type: rss
+    feed_url: https://the-decoder.com/feed/
+    site_url: https://the-decoder.com/
+    enabled: true
+    tier: 1
+    freshness_window_hours: 72
+    adapter: generic_rss
+    request_headers: {}
+    notes: AI-focused editorial coverage.
+
+  - id: techcrunch_ai
+    name: TechCrunch AI
+    source_class: editorial
+    source_category: trusted_editorial
+    feed_type: rss
+    feed_url: https://techcrunch.com/category/artificial-intelligence/feed/
+    site_url: https://techcrunch.com/category/artificial-intelligence/
+    enabled: true
+    tier: 1
+    freshness_window_hours: 72
+    adapter: generic_rss
+    request_headers: {}
+    notes: AI startup, product, and market coverage.
+
+  - id: the_verge_ai
+    name: The Verge AI
+    source_class: editorial
+    source_category: trusted_editorial
+    feed_type: rss
+    feed_url: https://www.theverge.com/rss/ai-artificial-intelligence/index.xml
+    site_url: https://www.theverge.com/ai-artificial-intelligence
+    enabled: true
+    tier: 1
+    freshness_window_hours: 72
+    adapter: generic_rss
+    request_headers: {}
+    notes: AI product, policy, and consumer-facing coverage.
+
+  - id: ars_technica_ai
+    name: Ars Technica AI
+    source_class: editorial
+    source_category: trusted_editorial
+    feed_type: rss
+    feed_url: https://arstechnica.com/ai/feed/
+    site_url: https://arstechnica.com/ai/
+    enabled: true
+    tier: 1
+    freshness_window_hours: 96
+    adapter: generic_rss
+    request_headers: {}
+    notes: Technical and policy-heavy AI coverage.
+
+  - id: hn_ai
+    name: Hacker News AI Search
+    source_class: community
+    source_category: community_hn
+    feed_type: rss
+    feed_url: https://hnrss.org/newest?q=AI
+    site_url: https://news.ycombinator.com/
+    enabled: true
+    tier: 1
+    freshness_window_hours: 48
+    adapter: generic_rss
+    request_headers:
+      User-Agent: "OpenClaw swarm.channel local news ingestion prototype (contact: operator)"
+    notes: Community source; preserve source provenance without interpretation.
+
+  - id: reddit_localllama
+    name: Reddit LocalLLaMA
+    source_class: community
+    source_category: community_reddit
+    feed_type: rss
+    feed_url: https://www.reddit.com/r/LocalLLaMA/.rss
+    site_url: https://www.reddit.com/r/LocalLLaMA/
+    enabled: true
+    tier: 1
+    freshness_window_hours: 72
+    adapter: generic_rss
+    request_headers:
+      User-Agent: "OpenClaw swarm.channel local news ingestion prototype (contact: operator)"
+    notes: Community source; preserve source provenance without interpretation.
