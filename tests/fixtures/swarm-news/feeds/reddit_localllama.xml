@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0">
+  <channel>
+    <title>r/LocalLLaMA</title>
+    <item>
+      <guid>reddit-guid-1</guid>
+      <title>Rumor: new open model benchmark leak</title>
+      <link>https://www.reddit.com/r/LocalLLaMA/comments/abc123/rumor_new_open_model_benchmark_leak/?utm_source=rss</link>
+      <pubDate>Tue, 29 Apr 2026 08:30:00 +0000</pubDate>
+      <description>Community thread discussing an unverified benchmark rumor.</description>
+    </item>
+  </channel>
+</rss>

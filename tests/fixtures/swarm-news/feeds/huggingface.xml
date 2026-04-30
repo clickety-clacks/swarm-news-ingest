@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <title>Hugging Face Blog</title>
+  <entry>
+    <id>tag:huggingface.co,2026:1</id>
+    <title>Local inference toolkit</title>
+    <link href="https://huggingface.example/blog/local-inference?ref=rss" rel="alternate" />
+    <updated>2026-04-29T11:00:00Z</updated>
+    <summary>Run local models with less glue.</summary>
+  </entry>
+</feed>

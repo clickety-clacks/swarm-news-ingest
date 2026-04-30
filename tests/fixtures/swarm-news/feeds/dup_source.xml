@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0">
+  <channel>
+    <title>Duplicate Source</title>
+    <item>
+      <title>Canonical duplicate story</title>
+      <link>https://dup.example/story?utm_source=rss</link>
+      <pubDate>Tue, 29 Apr 2026 07:00:00 +0000</pubDate>
+      <description>First copy of the same source story.</description>
+    </item>
+    <item>
+      <title>Canonical duplicate story</title>
+      <link>https://dup.example/story?utm_medium=email</link>
+      <pubDate>Tue, 29 Apr 2026 07:00:00 +0000</pubDate>
+      <description>Second copy of the same source story.</description>
+    </item>
+  </channel>
+</rss>

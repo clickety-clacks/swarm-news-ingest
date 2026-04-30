@@ -1,0 +1,143 @@
+sources:
+  - id: openai
+    name: OpenAI
+    source_class: official
+    source_category: official_lab
+    feed_type: rss
+    feed_url: https://fixture.invalid/openai.xml
+    site_url: https://openai.example/news
+    enabled: true
+    tier: 1
+    freshness_window_hours: 72
+    adapter: generic_rss
+    request_headers: {}
+
+  - id: huggingface
+    name: Hugging Face
+    source_class: official
+    source_category: official_platform
+    feed_type: atom
+    feed_url: https://fixture.invalid/huggingface.xml
+    site_url: https://huggingface.example/blog
+    enabled: true
+    tier: 1
+    freshness_window_hours: 96
+    adapter: generic_atom
+    request_headers: {}
+
+  - id: arxiv_cs_ai
+    name: arXiv cs.AI
+    source_class: research
+    source_category: research_arxiv
+    feed_type: arxiv_atom
+    feed_url: https://fixture.invalid/arxiv_cs_ai.xml
+    site_url: https://arxiv.org/list/cs.AI/recent
+    enabled: true
+    tier: 1
+    freshness_window_hours: 120
+    adapter: arxiv_atom
+    request_headers: {}
+
+  - id: hn_ai
+    name: Hacker News AI Search
+    source_class: community
+    source_category: community_hn
+    feed_type: rss
+    feed_url: https://fixture.invalid/hn_ai.xml
+    site_url: https://news.ycombinator.com/
+    enabled: true
+    tier: 1
+    freshness_window_hours: 48
+    adapter: generic_rss
+    request_headers: {}
+
+  - id: reddit_localllama
+    name: Reddit LocalLLaMA
+    source_class: community
+    source_category: community_reddit
+    feed_type: rss
+    feed_url: https://fixture.invalid/reddit_localllama.xml
+    site_url: https://reddit.example/r/LocalLLaMA
+    enabled: true
+    tier: 1
+    freshness_window_hours: 72
+    adapter: generic_rss
+    request_headers: {}
+
+  - id: dup_source
+    name: Duplicate Source
+    source_class: editorial
+    source_category: trusted_editorial
+    feed_type: rss
+    feed_url: https://fixture.invalid/dup_source.xml
+    site_url: https://dup.example/
+    enabled: true
+    tier: 1
+    freshness_window_hours: 72
+    adapter: generic_rss
+    request_headers: {}
+
+  - id: dup_title_source
+    name: Duplicate Title Source
+    source_class: editorial
+    source_category: trusted_editorial
+    feed_type: rss
+    feed_url: https://fixture.invalid/dup_title_source.xml
+    site_url: https://duptitle.example/
+    enabled: true
+    tier: 1
+    freshness_window_hours: 72
+    adapter: generic_rss
+    request_headers: {}
+
+  - id: cross_source_one
+    name: Cross Source One
+    source_class: editorial
+    source_category: trusted_editorial
+    feed_type: rss
+    feed_url: https://fixture.invalid/cross_source_one.xml
+    site_url: https://source-one.example/
+    enabled: true
+    tier: 1
+    freshness_window_hours: 72
+    adapter: generic_rss
+    request_headers: {}
+
+  - id: cross_source_two
+    name: Cross Source Two
+    source_class: editorial
+    source_category: trusted_editorial
+    feed_type: rss
+    feed_url: https://fixture.invalid/cross_source_two.xml
+    site_url: https://source-two.example/
+    enabled: true
+    tier: 1
+    freshness_window_hours: 72
+    adapter: generic_rss
+    request_headers: {}
+
+  - id: empty_source
+    name: Empty Source
+    source_class: editorial
+    source_category: trusted_editorial
+    feed_type: rss
+    feed_url: https://fixture.invalid/empty_source.xml
+    site_url: https://empty.example/
+    enabled: true
+    tier: 1
+    freshness_window_hours: 72
+    adapter: generic_rss
+    request_headers: {}
+
+  - id: malformed_source
+    name: Malformed Source
+    source_class: editorial
+    source_category: trusted_editorial
+    feed_type: rss
+    feed_url: https://fixture.invalid/malformed_source.xml
+    site_url: https://broken.example/
+    enabled: true
+    tier: 1
+    freshness_window_hours: 72
+    adapter: generic_rss
+    request_headers: {}

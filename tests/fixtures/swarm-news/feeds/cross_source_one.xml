@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0">
+  <channel>
+    <title>Cross Source One</title>
+    <item>
+      <guid>cross-one</guid>
+      <title>Shared story from source one</title>
+      <link>https://shared.example/story</link>
+      <pubDate>Tue, 29 Apr 2026 05:00:00 +0000</pubDate>
+      <description>Editorial write-up of a shared story.</description>
+    </item>
+  </channel>
+</rss>

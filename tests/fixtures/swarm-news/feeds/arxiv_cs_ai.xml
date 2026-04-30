@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom" xmlns:arxiv="http://arxiv.org/schemas/atom">
+  <entry>
+    <id>http://arxiv.org/abs/2604.12345v1</id>
+    <updated>2026-04-28T12:00:00Z</updated>
+    <published>2026-04-28T12:00:00Z</published>
+    <title>
+      Retrieval   Systems for Agents
+    </title>
+    <summary>
+      We study retrieval systems for agents and evaluate memory grounding.
+    </summary>
+    <author><name>Alice Example</name></author>
+    <author><name>Bob Example</name></author>
+    <link href="https://arxiv.org/abs/2604.12345" rel="alternate" type="text/html" />
+    <arxiv:primary_category term="cs.AI" />
+    <category term="cs.AI" />
+    <category term="cs.IR" />
+  </entry>
+</feed>

@@ -1,0 +1,13 @@
+sources:
+  - id: malformed_source
+    name: Malformed Source
+    source_class: editorial
+    source_category: trusted_editorial
+    feed_type: rss
+    feed_url: https://fixture.invalid/malformed_source.xml
+    site_url: https://broken.example/
+    enabled: true
+    tier: 1
+    freshness_window_hours: 72
+    adapter: generic_rss
+    request_headers: {}
