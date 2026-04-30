@@ -72,6 +72,7 @@ sudo .venv/bin/python -m pip install -U pip
 sudo .venv/bin/python -m pip install -e .
 sudo cp config/sources.yaml /etc/swarm-news-ingest/sources.yaml
 sudo ln -sf /opt/swarm-news-ingest/bin/swarm-news-ingest /usr/local/bin/swarm-news-ingest
+# The wrapper automatically uses /opt/swarm-news-ingest/.venv/bin/python when present.
 sudo chown -R swarm-news-ingest:swarm-news-ingest /var/lib/swarm-news-ingest /var/log/swarm-news-ingest
 ```
 
