@@ -108,6 +108,35 @@ Racter deploy should be treated as an operator deployment, not a code checkout e
 6. Log supervisor output under `/var/log/swarm-news-ingest/`.
 7. Only after the Subspace publisher exists, add publisher config separately; do not overload the scraper config with subscriber interpretation.
 
+
+## Current Racter install evidence
+
+Current verified Racter install:
+
+```text
+code: /opt/swarm-news-ingest
+config: /etc/swarm-news-ingest/sources.yaml
+output root: /var/lib/swarm-news-ingest/runs/
+command: /usr/local/bin/swarm-news-ingest
+run user: swarm-news-ingest
+verified commit: 646381c
+latest verified dry run: /var/lib/swarm-news-ingest/runs/dry-run-20260430T085742Z
+```
+
+Latest verified dry run result:
+
+```text
+dry_run: true
+publish_performed: false
+exit_status: success
+configured/enabled/fetched sources: 13/13/13
+failed sources: 0
+normalized entries: 1,907
+publish candidates: 1,907
+```
+
+No scheduler/timer and no Subspace publisher are installed yet.
+
 ## Scheduling options
 
 No scheduler is installed by default. Choose one per platform.
