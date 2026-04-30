@@ -169,7 +169,7 @@ sources:
     freshness_window_hours: 48
     adapter: generic_rss
     request_headers:
-      User-Agent: "OpenClaw swarm.channel local news ingestion prototype (contact: operator)"
+      User-Agent: "Argus RSS ingestion worker (contact: operator)"
     notes: Community source; preserve source provenance without interpretation.
 
   - id: reddit_localllama
@@ -184,5 +184,5 @@ sources:
     freshness_window_hours: 72
     adapter: generic_rss
     request_headers:
-      User-Agent: "OpenClaw swarm.channel local news ingestion prototype (contact: operator)"
+      User-Agent: "Argus RSS ingestion worker (contact: operator)"
     notes: Community source; preserve source provenance without interpretation.

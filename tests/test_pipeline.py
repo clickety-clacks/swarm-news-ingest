@@ -5,9 +5,9 @@ import unittest
 from datetime import datetime, timezone
 from pathlib import Path
 
-from swarm_news_ingest.pipeline import read_source_config, run_pipeline
+from argus.pipeline import read_source_config, run_pipeline
 
-FIXTURE_ROOT = Path(__file__).parent / "fixtures" / "swarm-news"
+FIXTURE_ROOT = Path(__file__).parent / "fixtures" / "argus"
 FEEDS = FIXTURE_ROOT / "feeds"
 NOW = datetime(2026, 4, 29, 12, 0, 0, tzinfo=timezone.utc)
 

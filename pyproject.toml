@@ -3,14 +3,14 @@ requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "swarm-news-ingest"
+name = "argus"
 version = "0.1.0"
-description = "Local-only swarm.channel news ingestion prototype"
+description = "Argus local-only RSS ingestion worker"
 requires-python = ">=3.9"
 dependencies = ["PyYAML>=6.0", "requests>=2.31"]
 
 [project.scripts]
-swarm-news-ingest = "swarm_news_ingest.cli:main"
+argus = "argus.cli:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}

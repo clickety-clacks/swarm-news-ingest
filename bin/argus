@@ -11,7 +11,7 @@ while [ -L "$SOURCE" ]; do
 done
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$SOURCE")" && pwd)
 PROJECT_ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)
-PYTHON_BIN="${SWARM_NEWS_PYTHON:-}"
+PYTHON_BIN="${ARGUS_PYTHON:-}"
 if [ -z "$PYTHON_BIN" ]; then
   if [ -x "$PROJECT_ROOT/.venv/bin/python" ]; then
     PYTHON_BIN="$PROJECT_ROOT/.venv/bin/python"
@@ -19,4 +19,4 @@ if [ -z "$PYTHON_BIN" ]; then
     PYTHON_BIN="python3"
   fi
 fi
-PYTHONPATH="$PROJECT_ROOT/src${PYTHONPATH:+:$PYTHONPATH}" exec "$PYTHON_BIN" -m swarm_news_ingest.cli "$@"
+PYTHONPATH="$PROJECT_ROOT/src${PYTHONPATH:+:$PYTHONPATH}" exec "$PYTHON_BIN" -m argus.cli "$@"

@@ -13,34 +13,34 @@ Use the platform's normal application data locations instead of cloning into ran
 Recommended layout:
 
 ```text
-~/src/swarm-news-ingest                         # source checkout for operators/developers
-~/.local/bin/swarm-news-ingest                  # executable shim or symlink
-~/.config/swarm-news-ingest/sources.yaml        # operator config
-~/.local/state/swarm-news-ingest/runs/          # run outputs/artifacts
-~/.local/state/swarm-news-ingest/logs/          # logs if supervised
+~/src/argus                         # source checkout for operators/developers
+~/.local/bin/argus                  # executable shim or symlink
+~/.config/argus/sources.yaml        # operator config
+~/.local/state/argus/runs/          # run outputs/artifacts
+~/.local/state/argus/logs/          # logs if supervised
 ```
 
 For a checked-out install:
 
 ```bash
 cd ~/src
-git clone https://github.com/clickety-clacks/swarm-news-ingest.git
-cd swarm-news-ingest
+git clone https://github.com/clickety-clacks/argus.git
+cd argus
 python3 -m venv .venv
 . .venv/bin/activate
 python -m pip install -U pip
 python -m pip install -e .
-mkdir -p ~/.local/bin ~/.config/swarm-news-ingest ~/.local/state/swarm-news-ingest/runs
-cp config/sources.yaml ~/.config/swarm-news-ingest/sources.yaml
-ln -sf "$PWD/bin/swarm-news-ingest" ~/.local/bin/swarm-news-ingest
+mkdir -p ~/.local/bin ~/.config/argus ~/.local/state/argus/runs
+cp config/sources.yaml ~/.config/argus/sources.yaml
+ln -sf "$PWD/bin/argus" ~/.local/bin/argus
 ```
 
 Run it:
 
 ```bash
-~/.local/bin/swarm-news-ingest \
-  --sources ~/.config/swarm-news-ingest/sources.yaml \
-  --out ~/.local/state/swarm-news-ingest/runs/$(date -u +%Y%m%dT%H%M%SZ)
+~/.local/bin/argus \
+  --sources ~/.config/argus/sources.yaml \
+  --out ~/.local/state/argus/runs/$(date -u +%Y%m%dT%H%M%SZ)
 ```
 
 ### Linux system install
@@ -48,40 +48,40 @@ Run it:
 For a shared/server install, use `/opt` for code, `/etc` for config, and `/var/lib` for state:
 
 ```text
-/opt/swarm-news-ingest/                         # source checkout / release tree
-/usr/local/bin/swarm-news-ingest                # executable shim or symlink
-/etc/swarm-news-ingest/sources.yaml             # system config
-/var/lib/swarm-news-ingest/runs/                # run outputs/artifacts
-/var/log/swarm-news-ingest/                     # logs if supervised
+/opt/argus/                         # source checkout / release tree
+/usr/local/bin/argus                # executable shim or symlink
+/etc/argus/sources.yaml             # system config
+/var/lib/argus/runs/                # run outputs/artifacts
+/var/log/argus/                     # logs if supervised
 ```
 
 Suggested service user:
 
 ```bash
-sudo useradd --system --home /var/lib/swarm-news-ingest --shell /usr/sbin/nologin swarm-news-ingest
+sudo useradd --system --home /var/lib/argus --shell /usr/sbin/nologin argus
 ```
 
 Install:
 
 ```bash
-sudo mkdir -p /opt /etc/swarm-news-ingest /var/lib/swarm-news-ingest/runs /var/log/swarm-news-ingest
-git clone https://github.com/clickety-clacks/swarm-news-ingest.git /opt/swarm-news-ingest
-cd /opt/swarm-news-ingest
+sudo mkdir -p /opt /etc/argus /var/lib/argus/runs /var/log/argus
+git clone https://github.com/clickety-clacks/argus.git /opt/argus
+cd /opt/argus
 sudo python3 -m venv .venv
 sudo .venv/bin/python -m pip install -U pip
 sudo .venv/bin/python -m pip install -e .
-sudo cp config/sources.yaml /etc/swarm-news-ingest/sources.yaml
-sudo ln -sf /opt/swarm-news-ingest/bin/swarm-news-ingest /usr/local/bin/swarm-news-ingest
-# The wrapper automatically uses /opt/swarm-news-ingest/.venv/bin/python when present.
-sudo chown -R swarm-news-ingest:swarm-news-ingest /var/lib/swarm-news-ingest /var/log/swarm-news-ingest
+sudo cp config/sources.yaml /etc/argus/sources.yaml
+sudo ln -sf /opt/argus/bin/argus /usr/local/bin/argus
+# The wrapper automatically uses /opt/argus/.venv/bin/python when present.
+sudo chown -R argus:argus /var/lib/argus /var/log/argus
 ```
 
 Run once:
 
 ```bash
-sudo -u swarm-news-ingest /usr/local/bin/swarm-news-ingest \
-  --sources /etc/swarm-news-ingest/sources.yaml \
-  --out /var/lib/swarm-news-ingest/runs/$(date -u +%Y%m%dT%H%M%SZ)
+sudo -u argus /usr/local/bin/argus \
+  --sources /etc/argus/sources.yaml \
+  --out /var/lib/argus/runs/$(date -u +%Y%m%dT%H%M%SZ)
 ```
 
 ## Racter target install
@@ -91,21 +91,21 @@ Racter is the intended first always-on runtime host for this project.
 Recommended Racter layout:
 
 ```text
-/opt/swarm-news-ingest/
-/etc/swarm-news-ingest/sources.yaml
-/var/lib/swarm-news-ingest/runs/
-/var/log/swarm-news-ingest/
-/usr/local/bin/swarm-news-ingest
+/opt/argus/
+/etc/argus/sources.yaml
+/var/lib/argus/runs/
+/var/log/argus/
+/usr/local/bin/argus
 ```
 
 Racter deploy should be treated as an operator deployment, not a code checkout experiment:
 
-1. Pull or clone `https://github.com/clickety-clacks/swarm-news-ingest.git` into `/opt/swarm-news-ingest`.
-2. Create/update the Python virtualenv under `/opt/swarm-news-ingest/.venv`.
+1. Pull or clone `https://github.com/clickety-clacks/argus.git` into `/opt/argus`.
+2. Create/update the Python virtualenv under `/opt/argus/.venv`.
 3. Install the package editable or from the checked-out tree.
-4. Install `/etc/swarm-news-ingest/sources.yaml` from `config/sources.yaml`, then edit only config in `/etc`.
-5. Write run artifacts under `/var/lib/swarm-news-ingest/runs/<timestamp>/`.
-6. Log supervisor output under `/var/log/swarm-news-ingest/`.
+4. Install `/etc/argus/sources.yaml` from `config/sources.yaml`, then edit only config in `/etc`.
+5. Write run artifacts under `/var/lib/argus/runs/<timestamp>/`.
+6. Log supervisor output under `/var/log/argus/`.
 7. Only after the Subspace publisher exists, add publisher config separately; do not overload the scraper config with subscriber interpretation.
 
 
@@ -114,13 +114,13 @@ Racter deploy should be treated as an operator deployment, not a code checkout e
 Current verified Racter install:
 
 ```text
-code: /opt/swarm-news-ingest
-config: /etc/swarm-news-ingest/sources.yaml
-output root: /var/lib/swarm-news-ingest/runs/
-command: /usr/local/bin/swarm-news-ingest
-run user: swarm-news-ingest
-verified commit: 646381c
-latest verified dry run: /var/lib/swarm-news-ingest/runs/dry-run-20260430T085742Z
+code: /opt/argus
+config: /etc/argus/sources.yaml
+output root: /var/lib/argus/runs/
+command: /usr/local/bin/argus
+run user: argus
+verified commit: pre-rename 646381c; Argus rename pending Racter migration
+latest verified dry run: /var/lib/argus/runs/dry-run-20260430T085742Z
 ```
 
 Latest verified dry run result:
@@ -146,24 +146,24 @@ No scheduler is installed by default. Choose one per platform.
 Example service:
 
 ```ini
-# /etc/systemd/system/swarm-news-ingest.service
+# /etc/systemd/system/argus.service
 [Unit]
-Description=swarm.channel news feed ingestion
+Description=Argus RSS feed ingestion
 
 [Service]
 Type=oneshot
-User=swarm-news-ingest
-Group=swarm-news-ingest
-WorkingDirectory=/opt/swarm-news-ingest
-ExecStart=/usr/local/bin/swarm-news-ingest --sources /etc/swarm-news-ingest/sources.yaml --out /var/lib/swarm-news-ingest/runs/%N-%H
+User=argus
+Group=argus
+WorkingDirectory=/opt/argus
+ExecStart=/usr/local/bin/argus --sources /etc/argus/sources.yaml --out /var/lib/argus/runs/%N-%H
 ```
 
 Example timer:
 
 ```ini
-# /etc/systemd/system/swarm-news-ingest.timer
+# /etc/systemd/system/argus.timer
 [Unit]
-Description=Run swarm.channel news feed ingestion periodically
+Description=Run Argus RSS feed ingestion periodically
 
 [Timer]
 OnBootSec=5m
@@ -178,22 +178,22 @@ Enable:
 
 ```bash
 sudo systemctl daemon-reload
-sudo systemctl enable --now swarm-news-ingest.timer
+sudo systemctl enable --now argus.timer
 ```
 
 The `ExecStart` output path should usually be replaced with a wrapper script that creates a UTC timestamped directory. The raw unit above is a shape example, not the final Racter service.
 
 ### launchd, macOS
 
-Use launchd only for Mac hosts. Keep config in `~/.config/swarm-news-ingest` and output in `~/.local/state/swarm-news-ingest` for single-user installs.
+Use launchd only for Mac hosts. Keep config in `~/.config/argus` and output in `~/.local/state/argus` for single-user installs.
 
 ## Dry-run before deploy
 
 Dry-run is the official pre-publish verification mode. It fetches real RSS sources and writes the same local artifacts, but performs no Subspace publish:
 
 ```bash
-OUT=/var/lib/swarm-news-ingest/runs/dry-run-$(date -u +%Y%m%dT%H%M%SZ)
-swarm-news-ingest --dry-run --sources /etc/swarm-news-ingest/sources.yaml --out "$OUT"
+OUT=/var/lib/argus/runs/dry-run-$(date -u +%Y%m%dT%H%M%SZ)
+argus --dry-run --sources /etc/argus/sources.yaml --out "$OUT"
 python3 -m json.tool "$OUT/run-summary.json"
 head -20 "$OUT/publish-candidates.jsonl"
 ```
@@ -205,7 +205,7 @@ For Racter, run this after install and before enabling any scheduler or publishe
 Before calling any install healthy:
 
 ```bash
-swarm-news-ingest --dry-run --sources <config-path> --out <fresh-output-dir>
+argus --dry-run --sources <config-path> --out <fresh-output-dir>
 ```
 
 Then verify:
@@ -225,7 +225,7 @@ Expected current live baseline from the default config is roughly 13 enabled sou
 For source installs:
 
 ```bash
-cd /opt/swarm-news-ingest   # or ~/src/swarm-news-ingest
+cd /opt/argus   # or ~/src/argus
 git pull --ff-only
 . .venv/bin/activate
 python -m pip install -e .
@@ -238,14 +238,14 @@ Run the verification gate after upgrade.
 For source installs:
 
 ```bash
-cd /opt/swarm-news-ingest
+cd /opt/argus
 git log --oneline --max-count=10
 git checkout <known-good-sha>
 . .venv/bin/activate
 python -m pip install -e .
 ```
 
-Keep previous run artifacts; do not delete `/var/lib/swarm-news-ingest/runs/` during rollback.
+Keep previous run artifacts; do not delete `/var/lib/argus/runs/` during rollback.
 
 ## Current hard boundaries
 

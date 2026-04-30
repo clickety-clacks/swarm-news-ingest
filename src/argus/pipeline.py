@@ -164,7 +164,7 @@ def read_source_config(path: Path) -> List[SourceConfig]:
 
 def fetch_feed(source: SourceConfig) -> Tuple[str, Optional[int], Optional[str], int]:
     started = time.perf_counter()
-    headers = {"User-Agent": "swarm-news-ingest/0.1 (+local-only prototype)"}
+    headers = {"User-Agent": "argus/0.1 (+local-only worker)"}
     headers.update(source.request_headers)
     response = requests.get(source.feed_url, headers=headers, timeout=REQUEST_TIMEOUT_SECONDS)
     elapsed_ms = int((time.perf_counter() - started) * 1000)
@@ -615,7 +615,7 @@ def run_pipeline(
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Local-only swarm.channel news ingestion")
+    parser = argparse.ArgumentParser(description="Argus local-only RSS ingestion")
     parser.add_argument("--sources", required=True, type=Path)
     parser.add_argument("--out", required=True, type=Path)
     parser.add_argument("--now", type=str)
