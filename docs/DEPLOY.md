@@ -120,7 +120,7 @@ output root: /var/lib/argus/runs/
 command: /usr/local/bin/argus
 run user: argus
 verified commit: fd286a4
-latest verified dry run: /var/lib/argus/runs/dry-run-20260430T185027Z
+latest verified dry run: /var/lib/argus/runs/dry-run-20260430T185205Z
 ```
 
 Latest verified dry run result:
