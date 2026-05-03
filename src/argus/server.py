@@ -7,6 +7,7 @@ import os
 import signal
 import sqlite3
 import subprocess
+import tempfile
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -36,7 +37,7 @@ class PublishConfig:
     state: str = "inactive"
     live_approval: bool = False
     subspace_endpoint: Optional[str] = None
-    require_embeddings: bool = False
+    require_embeddings: bool = True
     allow_non_embedded_fallback: bool = False
 
 
@@ -167,7 +168,16 @@ def load_runtime_config(path: Path) -> RuntimeConfig:
     sources_payload = payload.get("sources")
     if not isinstance(sources_payload, list):
         raise PipelineError("sources must be a list")
-    sources = [source_from_runtime(row) for row in sources_payload if isinstance(row, dict)]
+    seen_source_ids = set()
+    sources = []
+    for row in sources_payload:
+        if not isinstance(row, dict):
+            continue
+        source = source_from_runtime(row)
+        if source.id in seen_source_ids:
+            raise PipelineError("Duplicate source id: {}".format(source.id))
+        seen_source_ids.add(source.id)
+        sources.append(source)
     if not any(source.enabled for source in sources):
         raise PipelineError("at least one enabled source is required")
     publish_payload = payload.get("publish") or {}
@@ -175,7 +185,7 @@ def load_runtime_config(path: Path) -> RuntimeConfig:
         state=str(publish_payload.get("state", "inactive")),
         live_approval=bool(publish_payload.get("live_approval", False)),
         subspace_endpoint=(str(publish_payload["subspace_endpoint"]) if publish_payload.get("subspace_endpoint") else None),
-        require_embeddings=bool(publish_payload.get("require_embeddings", False)),
+        require_embeddings=bool(publish_payload.get("require_embeddings", True)),
         allow_non_embedded_fallback=bool(publish_payload.get("allow_non_embedded_fallback", False)),
     )
     if publish.state not in {"inactive", "active"}:
@@ -429,6 +439,7 @@ class ArgusServer:
         }
         payload = json.dumps(registration, sort_keys=True) + "\n"
         self._runtime_registration_path().write_text(payload)
+        self._temp_registration_path().write_text(payload)
         try:
             self._config_registration_path().write_text(payload)
         except OSError:
@@ -439,6 +450,10 @@ class ArgusServer:
 
     def _runtime_registration_path(self) -> Path:
         return self.config.database_path.with_name("argus.service.json")
+
+    def _temp_registration_path(self) -> Path:
+        name = "argus-{}.service.json".format(hashlib.sha256(str(self.config_path).encode("utf-8")).hexdigest()[:24])
+        return Path(tempfile.gettempdir()) / name
 
     def close(self) -> None:
         self.connection.close()
@@ -565,13 +580,17 @@ class ArgusServer:
             )
             summary["run_id"] = run_id
             summary["run_kind"] = run_kind
-            summary["effective_publish_snapshot"] = snapshot
+            if self.reload_requested:
+                self.reload_requested = False
+                self.reload()
+            publish_snapshot = latest_snapshot(self.connection)
+            summary["effective_publish_snapshot"] = publish_snapshot
             (output_dir / "run-summary.json").write_text(json.dumps(summary, indent=2) + "\n")
-            self._store_run(run_id, run_kind, now, exit_code, output_dir, snapshot, summary)
+            self._store_run(run_id, run_kind, now, exit_code, output_dir, publish_snapshot, summary)
             if prime:
                 self._write_prime_artifacts(output_dir)
             else:
-                self._store_packages_and_publish(run_id, now, output_dir, snapshot)
+                self._store_packages_and_publish(run_id, now, output_dir, publish_snapshot)
             completed_at = self.clock.now()
             self._record_scheduler_completion(run_id, completed_at)
             self._record_scheduler_event("cycle_completed", run_id, "ok" if exit_code == 0 else "failed", {"run_kind": run_kind}, completed_at)
@@ -604,13 +623,14 @@ class ArgusServer:
         rows = [json.loads(line) for line in candidates_path.read_text().splitlines() if line.strip()]
         for candidate in rows:
             package_id = "package:" + hashlib.sha256(json.dumps(candidate, sort_keys=True).encode("utf-8")).hexdigest()
-            active_eligible = snapshot["effective_mode"] == "active"
+            has_embedding = bool(candidate.get("supplied_embeddings") or candidate.get("embedding"))
+            publish_allowed = snapshot["effective_mode"] == "active" and (
+                not snapshot["require_embeddings"] or snapshot["allow_non_embedded_fallback"] or has_embedding
+            )
             self.connection.execute(
                 "INSERT OR IGNORE INTO packages VALUES (?, ?, ?, ?, ?, ?)",
-                (package_id, candidate["report_id"], run_id, iso_z(now), int(active_eligible), json.dumps(candidate, sort_keys=True)),
+                (package_id, candidate["report_id"], run_id, iso_z(now), int(publish_allowed), json.dumps(candidate, sort_keys=True)),
             )
-            has_embedding = bool(candidate.get("supplied_embeddings") or candidate.get("embedding"))
-            publish_allowed = active_eligible and (not snapshot["require_embeddings"] or snapshot["allow_non_embedded_fallback"] or has_embedding)
             if publish_allowed:
                 target = hashlib.sha256(str(self.config.publish.subspace_endpoint).encode("utf-8")).hexdigest()
                 key = "sha256:" + hashlib.sha256(("publish:v0\n{}\n{}".format(package_id, target)).encode("utf-8")).hexdigest()
@@ -709,7 +729,7 @@ class ArgusServer:
         return row
 
     def _last_run(self) -> Optional[Dict[str, Any]]:
-        row = self.connection.execute("SELECT * FROM runs ORDER BY started_at DESC LIMIT 1").fetchone()
+        row = self.connection.execute("SELECT * FROM runs ORDER BY started_at DESC, rowid DESC LIMIT 1").fetchone()
         return dict(row) if row else None
 
 
@@ -718,7 +738,7 @@ def run_status(db_path: Path) -> Dict[str, Any]:
     try:
         snapshot_row = connection.execute("SELECT snapshot_json FROM runtime_config_snapshots ORDER BY observed_at DESC, rowid DESC LIMIT 1").fetchone()
         scheduler_row = connection.execute("SELECT * FROM scheduler_state WHERE id = 1").fetchone()
-        run_row = connection.execute("SELECT * FROM runs ORDER BY started_at DESC LIMIT 1").fetchone()
+        run_row = connection.execute("SELECT * FROM runs ORDER BY started_at DESC, rowid DESC LIMIT 1").fetchone()
         return {
             "publish": json.loads(snapshot_row["snapshot_json"]) if snapshot_row else None,
             "scheduler": dict(scheduler_row) if scheduler_row else None,
@@ -729,9 +749,11 @@ def run_status(db_path: Path) -> Dict[str, Any]:
 
 
 def request_process_reload(config_path: Path) -> Dict[str, Any]:
+    temp_registration_path = Path(tempfile.gettempdir()) / "argus-{}.service.json".format(hashlib.sha256(str(config_path).encode("utf-8")).hexdigest()[:24])
     registration_path = config_path.with_name(config_path.name + ".service.json")
-    if registration_path.exists():
-        registration = json.loads(registration_path.read_text())
+    effective_registration_path = registration_path if registration_path.exists() else temp_registration_path
+    if effective_registration_path.exists():
+        registration = json.loads(effective_registration_path.read_text())
         pid = int(registration["pid"])
         if not _pid_matches_config(pid, config_path):
             raise PipelineError("Recorded Argus service is not running for {}".format(config_path))

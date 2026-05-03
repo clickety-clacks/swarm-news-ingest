@@ -138,7 +138,12 @@ class ServerTests(unittest.TestCase):
                 snapshot = json.loads(rows(root / "argus.sqlite3", "runtime_config_snapshots")[-1]["snapshot_json"])
                 self.assertEqual(snapshot["effective_mode"], "blocked")
 
-                config["publish"] = {"state": "active", "live_approval": True, "subspace_endpoint": "https://subspace.invalid"}
+                config["publish"] = {
+                    "state": "active",
+                    "live_approval": True,
+                    "subspace_endpoint": "https://subspace.invalid",
+                    "allow_non_embedded_fallback": True,
+                }
                 path.write_text(yaml.safe_dump(config))
                 server.reload()
                 clock.advance(3600)
