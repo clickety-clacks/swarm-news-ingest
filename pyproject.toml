@@ -5,16 +5,15 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "argus"
 version = "0.1.0"
-description = "Argus local-only RSS ingestion worker"
+description = "Argus server-mode news ingestion and Subspace publisher"
 requires-python = ">=3.9"
 dependencies = ["PyYAML>=6.0", "requests>=2.31"]
 
 [project.scripts]
-argus = "argus.cli:main"
+argus = "argus.pipeline:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}
 
 [tool.setuptools.packages.find]
 where = ["src"]
-

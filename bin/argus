@@ -19,4 +19,4 @@ if [ -z "$PYTHON_BIN" ]; then
     PYTHON_BIN="python3"
   fi
 fi
-PYTHONPATH="$PROJECT_ROOT/src${PYTHONPATH:+:$PYTHONPATH}" exec "$PYTHON_BIN" -m argus.cli "$@"
+PYTHONPATH="$PROJECT_ROOT/src${PYTHONPATH:+:$PYTHONPATH}" exec "$PYTHON_BIN" -m argus.pipeline "$@"

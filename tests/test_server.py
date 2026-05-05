@@ -142,6 +142,15 @@ class ServerTests(unittest.TestCase):
             self.assertEqual(config.scheduler.interval_seconds, 3600)
             self.assertEqual(config.publish.state, "inactive")
 
+    def test_top_level_help_exposes_server_commands(self):
+        output = StringIO()
+        with self.assertRaises(SystemExit) as raised:
+            with redirect_stdout(output):
+                command_main(["--help"])
+        self.assertEqual(raised.exception.code, 0)
+        self.assertIn("serve", output.getvalue())
+        self.assertIn("run-cycle", output.getvalue())
+
     def test_checked_in_server_config_is_racter_ready_and_inactive(self):
         config = load_runtime_config(Path("config/argus.example.yaml"))
         self.assertEqual(config.database_path, Path("/var/lib/argus/argus.sqlite3"))

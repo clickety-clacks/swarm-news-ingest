@@ -1093,7 +1093,7 @@ def command_main(argv: List[str]) -> int:
 
 def main(argv: Optional[List[str]] = None) -> int:
     argv = list(argv if argv is not None else sys.argv[1:])
-    if argv and argv[0] in {"serve", "prime", "run-cycle", "set-publish-state", "reload", "status", "source-health", "explain-skip"}:
+    if not argv or argv[0] in {"-h", "--help", "serve", "prime", "run-cycle", "set-publish-state", "reload", "status", "source-health", "explain-skip"}:
         return command_main(argv)
     args = build_parser().parse_args(argv)
     if args.dry_run and args.prime:
