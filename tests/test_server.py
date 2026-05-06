@@ -23,7 +23,7 @@ FEEDS = FIXTURE_ROOT / "feeds"
 NOW = datetime(2026, 4, 29, 12, 0, 0, tzinfo=timezone.utc)
 
 
-def write_config(root: Path, *, mode: str = "interval", interval: str = "1h", publish: dict | None = None, embedding: dict | bool | None = None) -> Path:
+def write_config(root: Path, *, mode: str = "interval", interval: str = "1h", publish: dict | None = None, embedding: dict | bool | None = None, schedule: dict | None = None) -> Path:
     fixture_dir = root / "feeds"
     fixture_dir.mkdir(exist_ok=True)
     shutil.copy(FEEDS / "stateful_source.xml", fixture_dir / "stateful-source.xml")
@@ -66,6 +66,8 @@ def write_config(root: Path, *, mode: str = "interval", interval: str = "1h", pu
             }
         ],
     }
+    if schedule:
+        config["schedule"].update(schedule)
     path = root / "argus.yaml"
     path.write_text(yaml.safe_dump(config))
     return path
@@ -1846,6 +1848,42 @@ print(json.dumps({
             self.assertEqual(calls, [])
             self.assertEqual(len(rows(root / "argus.sqlite3", "publish_attempts")), 0)
             self.assertEqual(len(rows(root / "argus.sqlite3", "packages")), 0)
+
+    def test_scheduled_live_publish_limit_fails_before_any_send(self):
+        with TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            path = write_config(
+                root,
+                publish={
+                    "state": "active",
+                    "live_approval": True,
+                    "subspace_endpoint": "https://subspace.swarm.channel",
+                    "require_embeddings": True,
+                },
+                schedule={"max_live_publishes_per_tick": 1},
+            )
+            calls = []
+            original_post = server_module.post_json_over_unix_socket
+            server_module.post_json_over_unix_socket = lambda *args: calls.append(args) or {"ok": True, "results": []}
+            server = ArgusServer(path, clock=FakeClock(NOW))
+            try:
+                with self.assertRaisesRegex(Exception, "canary publish limit exceeded"):
+                    server.tick()
+                state = dict(server.connection.execute("SELECT * FROM scheduler_state WHERE id = 1").fetchone())
+            finally:
+                server_module.post_json_over_unix_socket = original_post
+                server.close()
+            self.assertEqual(state["max_live_publishes_per_tick"], 1)
+            self.assertEqual(calls, [])
+            self.assertEqual(len(rows(root / "argus.sqlite3", "publish_attempts")), 0)
+            self.assertEqual(len(rows(root / "argus.sqlite3", "packages")), 0)
+
+    def test_schedule_live_publish_limit_rejects_invalid_values(self):
+        with TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            path = write_config(root, schedule={"max_live_publishes_per_tick": -1})
+            with self.assertRaisesRegex(Exception, "Invalid schedule.max_live_publishes_per_tick"):
+                load_runtime_config(path)
 
     def test_daemon_chunked_response_and_missing_message_id_failure(self):
         ok_response = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n4\r\n{\"ok\r\n14\r\n\":true,\"results\":[]}\r\n0\r\n\r\n"

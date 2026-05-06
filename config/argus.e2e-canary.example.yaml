@@ -10,6 +10,7 @@ schedule:
   jitter_seconds: 0
   run_on_startup_if_due: false
   missed_tick_policy: coalesce_one
+  max_live_publishes_per_tick: 1
 
 publish:
   state: inactive

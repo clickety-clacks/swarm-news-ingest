@@ -76,7 +76,7 @@ argus explain-skip --db /var/lib/argus/argus.sqlite3 --run <run_id>
 argus embedding-doctor --config /etc/argus/argus.yaml
 ```
 
-`serve --once` runs one scheduler decision for deterministic readiness checks. Long-running production uses plain `serve`.
+`serve --once` runs one scheduler decision for deterministic readiness checks. Long-running production uses plain `serve`. Canary or E2E scheduled configs may set `schedule.max_live_publishes_per_tick: 1` so a scheduler tick fails before posting if more than one live publish is eligible.
 
 Active publishing posts package JSON to `subspace-daemon` over the configured Unix socket/API path. The package JSON keeps canonical `supplied_embeddings`; the daemon request also carries the stable `publish_idempotency_key` and daemon-compatible embedding vectors. Production configs use Argus' built-in OpenAI embedding backend with `provider=openai`, `model=text-embedding-3-small`, `dimensions=1536`, and `space_id=openai:text-embedding-3-small:1536:v1`, which is compatible with Subspace daemon receptor matching. Use the checked-in canary config only with explicit Flynn approval before any externally visible send.
 

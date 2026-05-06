@@ -43,6 +43,7 @@ class SchedulerConfig:
     jitter_seconds: int = 0
     run_on_startup_if_due: bool = True
     missed_tick_policy: str = "coalesce_one"
+    max_live_publishes_per_tick: Optional[int] = None
 
 
 @dataclasses.dataclass(frozen=True)
@@ -178,6 +179,15 @@ def validate_scheduler(payload: Dict[str, Any]) -> SchedulerConfig:
     missed_tick_policy = str(payload.get("missed_tick_policy", "coalesce_one"))
     if missed_tick_policy != "coalesce_one":
         raise PipelineError("Invalid schedule.missed_tick_policy: {}".format(missed_tick_policy))
+    max_live_publishes_per_tick = None
+    raw_max_live_publishes_per_tick = payload.get("max_live_publishes_per_tick")
+    if raw_max_live_publishes_per_tick is not None:
+        try:
+            max_live_publishes_per_tick = int(raw_max_live_publishes_per_tick)
+        except (TypeError, ValueError):
+            raise PipelineError("Invalid schedule.max_live_publishes_per_tick: {}".format(raw_max_live_publishes_per_tick))
+        if max_live_publishes_per_tick < 0:
+            raise PipelineError("Invalid schedule.max_live_publishes_per_tick: {}".format(raw_max_live_publishes_per_tick))
     if jitter_seconds < 0 or jitter_seconds > 3600:
         raise PipelineError("Invalid schedule.jitter_seconds: {}".format(jitter_seconds))
     if mode == "interval":
@@ -191,6 +201,7 @@ def validate_scheduler(payload: Dict[str, Any]) -> SchedulerConfig:
         jitter_seconds=jitter_seconds,
         run_on_startup_if_due=bool(payload.get("run_on_startup_if_due", True)),
         missed_tick_policy=missed_tick_policy,
+        max_live_publishes_per_tick=max_live_publishes_per_tick,
     )
 
 
@@ -548,6 +559,7 @@ def apply_migrations(connection: sqlite3.Connection) -> None:
           jitter_seconds INTEGER NOT NULL,
           run_on_startup_if_due INTEGER NOT NULL,
           missed_tick_policy TEXT NOT NULL,
+          max_live_publishes_per_tick INTEGER,
           config_hash TEXT NOT NULL,
           last_decision_at TEXT,
           last_started_run_id TEXT,
@@ -590,6 +602,9 @@ def apply_migrations(connection: sqlite3.Connection) -> None:
     publish_columns = {row["name"] for row in connection.execute("PRAGMA table_info(publish_attempts)")}
     if "subspace_message_id" not in publish_columns:
         connection.execute("ALTER TABLE publish_attempts ADD COLUMN subspace_message_id TEXT")
+    scheduler_columns = {row["name"] for row in connection.execute("PRAGMA table_info(scheduler_state)")}
+    if "max_live_publishes_per_tick" not in scheduler_columns:
+        connection.execute("ALTER TABLE scheduler_state ADD COLUMN max_live_publishes_per_tick INTEGER")
     connection.commit()
 
 
@@ -1173,7 +1188,12 @@ class ArgusServer:
         if now < next_due_at:
             self._record_scheduler_event("decision_not_due", None, "skipped", {"next_due_at": state["next_due_at"]}, now)
             return None
-        return self._run_cycle("scheduled", now, prime=False)
+        return self._run_cycle(
+            "scheduled",
+            now,
+            prime=False,
+            max_live_publishes=self.config.scheduler.max_live_publishes_per_tick,
+        )
 
     def serve_forever(self) -> int:
         self.running = True
@@ -2063,15 +2083,17 @@ class ArgusServer:
         self.connection.execute(
             """
             INSERT INTO scheduler_state
-            (id, mode, interval_seconds, jitter_seconds, run_on_startup_if_due, missed_tick_policy, config_hash,
+            (id, mode, interval_seconds, jitter_seconds, run_on_startup_if_due, missed_tick_policy,
+             max_live_publishes_per_tick, config_hash,
              last_decision_at, last_started_run_id, last_completed_run_id, last_completed_at, running_run_id, next_due_at, updated_at)
-            VALUES (1, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, ?, NULL, ?, ?)
+            VALUES (1, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, ?, NULL, ?, ?)
             ON CONFLICT(id) DO UPDATE SET
               mode=excluded.mode,
               interval_seconds=excluded.interval_seconds,
               jitter_seconds=excluded.jitter_seconds,
               run_on_startup_if_due=excluded.run_on_startup_if_due,
               missed_tick_policy=excluded.missed_tick_policy,
+              max_live_publishes_per_tick=excluded.max_live_publishes_per_tick,
               config_hash=excluded.config_hash,
               next_due_at=excluded.next_due_at,
               updated_at=excluded.updated_at
@@ -2082,6 +2104,7 @@ class ArgusServer:
                 scheduler.jitter_seconds,
                 int(scheduler.run_on_startup_if_due),
                 scheduler.missed_tick_policy,
+                scheduler.max_live_publishes_per_tick,
                 self.config.config_hash,
                 last_completed_at,
                 next_due_at,
