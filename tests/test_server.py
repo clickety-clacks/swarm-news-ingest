@@ -169,6 +169,12 @@ class ServerTests(unittest.TestCase):
             self.assertEqual(config.scheduler.interval_seconds, 3600)
             self.assertEqual(config.publish.state, "inactive")
 
+    def test_scheduler_accepts_five_minute_operator_interval(self):
+        with TemporaryDirectory() as tmpdir:
+            path = write_config(Path(tmpdir), interval="5m")
+            config = load_runtime_config(path)
+            self.assertEqual(config.scheduler.interval_seconds, 300)
+
     def test_top_level_help_exposes_server_commands(self):
         output = StringIO()
         with self.assertRaises(SystemExit) as raised:

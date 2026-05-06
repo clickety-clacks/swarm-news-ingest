@@ -21,7 +21,7 @@ import requests
 from .pipeline import PipelineError, SourceConfig, date_bucket, iso_z, normalize_feed_entry_id, normalize_title, parse_now, run_pipeline_for_sources, utc_now
 
 
-MIN_INTERVAL_SECONDS = 15 * 60
+MIN_INTERVAL_SECONDS = 5 * 60
 MAX_INTERVAL_SECONDS = 24 * 60 * 60
 DEFAULT_INTERVAL_SECONDS = 60 * 60
 SOURCE_ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")

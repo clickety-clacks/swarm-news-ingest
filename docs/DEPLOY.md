@@ -61,7 +61,7 @@ Deterministic one-decision smoke check without deploying a supervisor:
 argus serve --config /etc/argus/argus.yaml --once
 ```
 
-For scheduled canary/E2E configs, set `schedule.max_live_publishes_per_tick: 1`. A scheduled tick then fails before sending if more than one package is live-publish eligible.
+For scheduled canary/E2E configs, short operator intervals down to `5m` are allowed. Set `schedule.max_live_publishes_per_tick: 1`; a scheduled tick then fails before sending if more than one package is live-publish eligible.
 
 Operator controls:
 
