@@ -190,10 +190,18 @@ class PipelineTests(unittest.TestCase):
                     "run-summary.json",
                     "source-health.json",
                     "normalized.jsonl",
+                    "normalized-items.jsonl",
                     "clusters.jsonl",
+                    "dedupe-decisions.json",
+                    "skipped-items.json",
+                    "package-candidates.jsonl",
                     "publish-candidates.jsonl",
                 ]:
                     self.assertTrue((Path(tmpdir) / name).exists(), name)
+                self.assertNotIn("digest_json", summary["artifact_paths"])
+                self.assertNotIn("digest_markdown", summary["artifact_paths"])
+                self.assertFalse((Path(tmpdir) / "digest.json").exists())
+                self.assertFalse((Path(tmpdir) / "digest.md").exists())
                 self.assertEqual(summary["state"]["path"], str(default_state_path(Path(tmpdir))))
                 self.assertTrue(summary["state"]["write_performed"])
 
@@ -368,6 +376,9 @@ class PipelineTests(unittest.TestCase):
             self.assertEqual(summary1["counts"]["publish_candidates"], 0)
             self.assertEqual(summary1["counts"]["primed_candidates"], 2)
             self.assertFalse((Path(tmpdir) / "prime" / "publish-candidates.jsonl").exists())
+            self.assertFalse((Path(tmpdir) / "prime" / "package-candidates.jsonl").exists())
+            self.assertFalse((Path(tmpdir) / "prime" / "digest.json").exists())
+            self.assertFalse((Path(tmpdir) / "prime" / "digest.md").exists())
 
             _, summary2 = run_pipeline(
                 Path(tmpdir) / "stateful-sources.yaml",

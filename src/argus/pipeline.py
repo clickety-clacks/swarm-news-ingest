@@ -936,8 +936,6 @@ def run_pipeline_for_sources(
             "clusters": "clusters.jsonl",
             "dedupe_decisions": "dedupe-decisions.json",
             "skipped_items": "skipped-items.json",
-            "digest_json": "digest.json",
-            "digest_markdown": "digest.md",
             **({} if prime else {"package_candidates": "package-candidates.jsonl", "publish_candidates": "publish-candidates.jsonl"}),
         },
         "dry_run": dry_run,
@@ -969,13 +967,6 @@ def run_pipeline_for_sources(
         if row.get("skipped_previously_seen_count", 0) or row.get("skipped_stale_count", 0)
     ]
     write_json(output_dir / "skipped-items.json", skipped_items)
-    digest = {
-        "run_id": run_summary["run_id"],
-        "candidate_count": len(publish_candidates),
-        "source_health": source_health,
-    }
-    write_json(output_dir / "digest.json", digest)
-    (output_dir / "digest.md").write_text("# Argus Digest\n\n{} package candidates.\n".format(len(publish_candidates)))
     if not prime:
         write_jsonl(output_dir / publish_candidates_artifact, publish_candidates)
         write_jsonl(output_dir / package_candidates_artifact, publish_candidates)

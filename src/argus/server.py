@@ -1447,7 +1447,6 @@ class ArgusServer:
                 summary["counts"]["publish_candidates"] = len(package_payloads)
                 summary["counts"]["embedding_failures"] = len(json.loads((output_dir / "embedding-failures.json").read_text()))
                 summary["artifact_paths"]["embedding_failures"] = "embedding-failures.json"
-                self._write_digest_artifacts(run_id, output_dir, package_payloads)
                 self._store_run(run_id, run_kind, now, exit_code, output_dir, cycle_snapshot, summary, commit=False)
                 (output_dir / "run-summary.json").write_text(json.dumps(summary, indent=2) + "\n")
                 self.connection.commit()
@@ -1612,21 +1611,6 @@ class ArgusServer:
         ]
         (output_dir / "dedupe-decisions.json").write_text(json.dumps(dedupe_rows, indent=2, sort_keys=True) + "\n")
         (output_dir / "skipped-items.json").write_text(json.dumps(skipped_rows, indent=2, sort_keys=True) + "\n")
-
-    def _write_digest_artifacts(self, run_id: str, output_dir: Path, package_payloads: List[Dict[str, Any]]) -> None:
-        source_health_path = output_dir / "source-health.json"
-        source_health = json.loads(source_health_path.read_text()) if source_health_path.exists() else []
-        digest = {
-            "run_id": run_id,
-            "candidate_count": len(package_payloads),
-            "source_health": source_health,
-        }
-        lines = ["# Argus Review Digest", "", "Run: `{}`".format(run_id), "", "Package candidates: {}".format(len(package_payloads)), ""]
-        for package in package_payloads:
-            body = package.get("body", {})
-            lines.append("- [{}]({}) — {}".format(body.get("title", "(untitled)"), body.get("url", ""), body.get("source_name", "")))
-        (output_dir / "digest.json").write_text(json.dumps(digest, indent=2, sort_keys=True) + "\n")
-        (output_dir / "digest.md").write_text("\n".join(lines).rstrip() + "\n")
 
     def _rewrite_source_health_final_counts(self, run_id: str, output_dir: Path, package_payloads: List[Dict[str, Any]]) -> None:
         path = output_dir / "source-health.json"

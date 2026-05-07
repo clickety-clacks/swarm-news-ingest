@@ -1160,13 +1160,13 @@ print(json.dumps({
             run_dir = next((root / "out" / "runs").glob("20260429T120000Z-scheduled-*"))
             failures = json.loads((run_dir / "embedding-failures.json").read_text())
             summary = json.loads((run_dir / "run-summary.json").read_text())
-            digest = json.loads((run_dir / "digest.json").read_text())
             self.assertEqual(len(failures), 2)
             self.assertEqual({failure["class"] for failure in failures}, {"embed_backend_unavailable"})
             self.assertEqual(len(rows(root / "argus.sqlite3", "packages")), 0)
             self.assertEqual(summary["counts"]["package_candidates"], 0)
             self.assertEqual(summary["counts"]["publish_candidates"], 0)
-            self.assertEqual(digest["candidate_count"], 0)
+            self.assertFalse((run_dir / "digest.json").exists())
+            self.assertFalse((run_dir / "digest.md").exists())
 
     def test_embedding_failure_retries_on_later_cycle(self):
         with TemporaryDirectory() as tmpdir:
@@ -1357,14 +1357,15 @@ print(json.dumps({
                 server.close()
             run_dir = next((root / "out" / "runs").glob("20260429T120000Z-scheduled-*"))
             for artifact in [
-                "digest.md",
-                "digest.json",
                 "normalized-items.jsonl",
                 "dedupe-decisions.json",
                 "skipped-items.json",
                 "package-candidates.jsonl",
+                "publish-candidates.jsonl",
             ]:
                 self.assertTrue((run_dir / artifact).exists(), artifact)
+            self.assertFalse((run_dir / "digest.md").exists())
+            self.assertFalse((run_dir / "digest.json").exists())
             self.assertEqual(len(rows(root / "argus.sqlite3", "normalized_reports")), 2)
             self.assertEqual(len(rows(root / "argus.sqlite3", "report_seen_runs")), 2)
             self.assertEqual(len(rows(root / "argus.sqlite3", "dedupe_keys")), 2)
