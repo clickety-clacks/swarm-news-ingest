@@ -14,8 +14,8 @@ schedule:
 publish:
   state: inactive
   live_approval: false
-  subspace_daemon_socket: ~/.openclaw/subspace-daemon/daemon.sock
-  subspace_daemon_api_path: /v1/messages
+  subspace_endpoint: https://subspace.swarm.channel
+  subspace_websocket_path: /api/firehose/stream/websocket
   require_embeddings: true
 
 embedding:

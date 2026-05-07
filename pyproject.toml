@@ -7,7 +7,7 @@ name = "argus"
 version = "0.1.0"
 description = "Argus server-mode news ingestion and Subspace publisher"
 requires-python = ">=3.9"
-dependencies = ["PyYAML>=6.0", "requests>=2.31"]
+dependencies = ["PyYAML>=6.0", "requests>=2.31", "websocket-client>=1.8"]
 
 [project.scripts]
 argus = "argus.pipeline:main"

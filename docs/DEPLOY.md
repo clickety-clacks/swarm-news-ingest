@@ -1,4 +1,4 @@
-# Argus server-mode deploy and Racter readiness runbook
+# Argus server-mode deploy and readiness runbook
 
 Argus production target is a long-running server process:
 
@@ -6,11 +6,11 @@ Argus production target is a long-running server process:
 argus serve --config /etc/argus/argus.yaml
 ```
 
-The host supervisor may start this process on Racter reboot. It must not schedule ingestion. Fetch cadence is owned by Argus' internal scheduler from `schedule:` config; the default interval is `1h`.
+The host supervisor may start this process on host reboot. It must not schedule ingestion. Fetch cadence is owned by Argus' internal scheduler from `schedule:` config; the default interval is `1h`.
 
 This runbook is a readiness/install guide only. Do not deploy from review agents unless Flynn explicitly asks for that exact deployment.
 
-## Racter filesystem layout
+## Filesystem layout
 
 ```text
 /opt/argus/                    # checkout or release tree
@@ -193,9 +193,9 @@ argus status --db /var/lib/argus/argus.sqlite3
 sqlite3 /var/lib/argus/argus.sqlite3 "select effective_mode, blocked_reason from runtime_config_snapshots order by observed_at desc, rowid desc limit 1;"
 ```
 
-## Racter readiness checks
+## Readiness checks
 
-Before declaring Racter ready, verify:
+Before declaring the deployment ready, verify:
 
 ```bash
 argus embedding-doctor --config /etc/argus/argus.yaml
@@ -232,8 +232,7 @@ publish:
   state: active
   live_approval: true
   subspace_endpoint: https://subspace.swarm.channel
-  subspace_daemon_socket: ~/.openclaw/subspace-daemon/daemon.sock
-  subspace_daemon_api_path: /v1/messages
+  subspace_websocket_path: /api/firehose/stream/websocket
   require_embeddings: true
 embedding:
   backend: openai
@@ -252,19 +251,19 @@ argus status --db /var/lib/argus-e2e/argus.sqlite3
 sqlite3 /var/lib/argus-e2e/argus.sqlite3 'select status, subspace_message_id, response_json from publish_attempts;'
 ```
 
-The checked-in canary config is fixture-backed by design so it emits exactly one operator-controlled package rather than live feed contents. The `--max-live-publishes 1` guard fails the cycle before any daemon POST if more than one active-eligible live send would be emitted. shrdlu-side receipt is verified outside Argus by observing the expected Subspace inbound message with the recorded `subspace_message_id` and package `package_id`.
+Set `ARGUS_SUBSPACE_AGENT_ID` and `ARGUS_SUBSPACE_SESSION_TOKEN` in the operator environment before the approved canary run. The checked-in canary config is fixture-backed by design so it emits exactly one operator-controlled package rather than live feed contents. The `--max-live-publishes 1` guard fails the cycle before any Subspace post if more than one active-eligible live send would be emitted. shrdlu-side receipt is verified downstream of Argus by observing the expected Subspace inbound message with the recorded `subspace_message_id` and package `package_id`.
 
 Rollback is to set the canary config back to `publish.state: inactive` and `publish.live_approval: false`, then rerun status checks. Do not delete the canary SQLite file before capturing the `publish_attempts` evidence.
 
 ## shrdlu receptor readiness
 
-Before live receptor E2E, install `config/receptors/argus-shrdlu-e2e-receptors.json` into a shrdlu-local receptor pack path such as `~/.openclaw/subspace-daemon/receptors/packs/argus-e2e/argus-shrdlu-e2e-receptors.json`, then point the Subetha `servers[].local_pack_paths` entry at that directory. The pack is intentionally scoped to `openai:text-embedding-3-small:1536:v1` and includes:
+Before live receptor E2E, install `config/receptors/argus-shrdlu-e2e-receptors.json` into a downstream receiver-local receptor pack path, then point the Subetha `servers[].local_pack_paths` entry at that directory. This is downstream receipt verification only; Argus publishing remains direct publisher-to-Subspace behavior and has no receiver-side runtime dependency. The pack is intentionally scoped to `openai:text-embedding-3-small:1536:v1` and includes:
 
 - `argus_news_positive_e2e`: positive receptor for Argus news canaries.
 - `argus_promotional_veto_e2e`: veto receptor for promotional/spam canaries.
 
-Do not run live Subetha sends until Flynn approves the exact live-send count. A receptor-aware product E2E needs separate positive-match, negative-no-match/no-wake, and veto-no-wake cases, with shrdlu daemon logs/runtime/session evidence for each.
+Do not run live Subetha sends until Flynn approves the exact live-send count. A receptor-aware product E2E needs separate positive-match, negative-no-match/no-wake, and veto-no-wake cases, with downstream receiver logs/runtime/session evidence for each.
 
 ## Supervisor boundary
 
-A supervisor may keep `argus serve --config /etc/argus/argus.yaml` running after Racter reboot. It must not be configured as a timer that periodically invokes one-shot ingestion. No cron, systemd timer, launchd timer, or equivalent external schedule is part of the production model.
+A supervisor may keep `argus serve --config /etc/argus/argus.yaml` running after host reboot. It must not be configured as a timer that periodically invokes one-shot ingestion. No cron, systemd timer, launchd timer, or equivalent external schedule is part of the production model.

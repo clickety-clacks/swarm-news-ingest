@@ -136,16 +136,55 @@ sys.exit(2)
     return script
 
 
+def fake_subspace_success(calls, message_id_prefix: str = "msg"):
+    def fake_post(endpoint, websocket_path, agent_id, session_token, text, embeddings, idempotency_key):
+        call = {
+            "endpoint": endpoint,
+            "websocket_path": websocket_path,
+            "agent_id": agent_id,
+            "session_token": session_token,
+            "text": text,
+            "embeddings": embeddings,
+            "idempotency_key": idempotency_key,
+        }
+        calls.append(call)
+        return {
+            "ok": True,
+            "results": [
+                {
+                    "server": endpoint,
+                    "sent": True,
+                    "subspace_message_id": "{}-{}".format(message_id_prefix, idempotency_key[-8:]),
+                    "idempotency_key": idempotency_key,
+                }
+            ],
+        }
+
+    return fake_post
+
+
 class ServerTests(unittest.TestCase):
     def setUp(self):
         self._original_request_openai_embedding = server_module.request_openai_embedding
         self._original_openai_api_key = server_module.openai_api_key
+        self._original_subspace_agent_id = os.environ.get("ARGUS_SUBSPACE_AGENT_ID")
+        self._original_subspace_session_token = os.environ.get("ARGUS_SUBSPACE_SESSION_TOKEN")
         server_module.openai_api_key = lambda: "test-openai-key"
         server_module.request_openai_embedding = self._fake_openai_embedding
+        os.environ["ARGUS_SUBSPACE_AGENT_ID"] = "argus-test-agent"
+        os.environ["ARGUS_SUBSPACE_SESSION_TOKEN"] = "argus-test-session-token"
 
     def tearDown(self):
         server_module.request_openai_embedding = self._original_request_openai_embedding
         server_module.openai_api_key = self._original_openai_api_key
+        if self._original_subspace_agent_id is None:
+            os.environ.pop("ARGUS_SUBSPACE_AGENT_ID", None)
+        else:
+            os.environ["ARGUS_SUBSPACE_AGENT_ID"] = self._original_subspace_agent_id
+        if self._original_subspace_session_token is None:
+            os.environ.pop("ARGUS_SUBSPACE_SESSION_TOKEN", None)
+        else:
+            os.environ["ARGUS_SUBSPACE_SESSION_TOKEN"] = self._original_subspace_session_token
 
     @staticmethod
     def _fake_openai_embedding(text, model, dimensions, api_key):
@@ -196,8 +235,8 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(config.publish.state, "inactive")
         self.assertFalse(config.publish.live_approval)
         self.assertTrue(config.publish.require_embeddings)
-        self.assertEqual(config.publish.subspace_daemon_socket, "~/.openclaw/subspace-daemon/daemon.sock")
-        self.assertEqual(config.publish.subspace_daemon_api_path, "/v1/messages")
+        self.assertEqual(config.publish.subspace_endpoint, "https://subspace.swarm.channel")
+        self.assertEqual(config.publish.subspace_websocket_path, "/api/firehose/stream/websocket")
         self.assertEqual(config.embedding.backend, "openai")
         self.assertEqual(config.embedding.provider, "openai")
         self.assertEqual(config.embedding.model, "text-embedding-3-small")
@@ -234,8 +273,7 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(config.publish.state, "inactive")
         self.assertFalse(config.publish.live_approval)
         self.assertEqual(config.publish.subspace_endpoint, "https://subspace.swarm.channel")
-        self.assertEqual(config.publish.subspace_daemon_socket, "~/.openclaw/subspace-daemon/daemon.sock")
-        self.assertEqual(config.publish.subspace_daemon_api_path, "/v1/messages")
+        self.assertEqual(config.publish.subspace_websocket_path, "/api/firehose/stream/websocket")
         self.assertEqual(config.embedding.backend, "openai")
         self.assertEqual(config.embedding.provider, "openai")
         self.assertEqual(config.embedding.model, "text-embedding-3-small")
@@ -259,6 +297,36 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(exit_code, 0)
         self.assertEqual(summary["counts"]["normalized_entries"], 1)
 
+    def test_publish_config_rejects_legacy_publish_topology_fields(self):
+        with TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            path = write_config(
+                root,
+                publish={
+                    "state": "inactive",
+                    "subspace_daemon_socket": "~/.openclaw/subspace-daemon/daemon.sock",
+                    "subspace_daemon_api_path": "/v1/messages",
+                },
+            )
+            with self.assertRaisesRegex(Exception, "legacy publish topology fields"):
+                load_runtime_config(path)
+
+    def test_publish_config_rejects_yaml_session_token(self):
+        with TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            path = write_config(
+                root,
+                publish={
+                    "state": "active",
+                    "live_approval": True,
+                    "subspace_endpoint": "https://subspace.swarm.channel",
+                    "subspace_session_token": "must-not-be-snapshotted",
+                    "require_embeddings": True,
+                },
+            )
+            with self.assertRaisesRegex(Exception, "ARGUS_SUBSPACE_SESSION_TOKEN"):
+                load_runtime_config(path)
+
     def test_checked_in_shrdlu_receptor_pack_uses_openai_space_and_veto(self):
         pack = json.loads(Path("config/receptors/argus-shrdlu-e2e-receptors.json").read_text())
         receptors = pack["receptors"]
@@ -280,23 +348,8 @@ class ServerTests(unittest.TestCase):
             path = root / "canary.yaml"
             path.write_text(yaml.safe_dump(config))
             calls = []
-            original_post = server_module.post_json_over_unix_socket
-
-            def fake_post(socket_path, api_path, payload):
-                calls.append(payload)
-                return {
-                    "ok": True,
-                    "results": [
-                        {
-                            "server": payload["server"],
-                            "sent": True,
-                            "subspace_message_id": "canary-message",
-                            "idempotency_key": payload["idempotency_key"],
-                        }
-                    ],
-                }
-
-            server_module.post_json_over_unix_socket = fake_post
+            original_post = server_module.post_message_to_subspace
+            server_module.post_message_to_subspace = fake_subspace_success(calls, "canary-message")
             server = ArgusServer(path, clock=FakeClock(NOW), register_service=False)
             original_cwd = os.getcwd()
             try:
@@ -304,7 +357,7 @@ class ServerTests(unittest.TestCase):
                 exit_code, summary = server.manual_cycle(max_live_publishes=1)
             finally:
                 os.chdir(original_cwd)
-                server_module.post_json_over_unix_socket = original_post
+                server_module.post_message_to_subspace = original_post
                 server.close()
             self.assertEqual(exit_code, 0)
             self.assertEqual(summary["counts"]["normalized_entries"], 1)
@@ -1707,32 +1760,20 @@ print(json.dumps({
                 },
             )
             calls = []
-            original_post = server_module.post_json_over_unix_socket
-
-            def fake_post(socket_path, api_path, payload):
-                calls.append({"socket_path": socket_path, "api_path": api_path, "payload": payload})
-                return {
-                    "ok": True,
-                    "results": [
-                        {
-                            "server": payload["server"],
-                            "sent": True,
-                            "subspace_message_id": "msg-" + payload["idempotency_key"][-8:],
-                            "idempotency_key": payload["idempotency_key"],
-                        }
-                    ],
-                }
-
-            server_module.post_json_over_unix_socket = fake_post
+            original_post = server_module.post_message_to_subspace
+            server_module.post_message_to_subspace = fake_subspace_success(calls)
             server = ArgusServer(path, clock=FakeClock(NOW))
             try:
                 server.tick()
             finally:
-                server_module.post_json_over_unix_socket = original_post
+                server_module.post_message_to_subspace = original_post
                 server.close()
             attempts = rows(root / "argus.sqlite3", "publish_attempts")
             self.assertEqual({row["status"] for row in attempts}, {"succeeded"})
             self.assertEqual(len(calls), 2)
+            self.assertEqual({call["endpoint"] for call in calls}, {"https://subspace.swarm.channel"})
+            self.assertEqual({call["websocket_path"] for call in calls}, {"/api/firehose/stream/websocket"})
+            self.assertEqual({call["agent_id"] for call in calls}, {"argus-test-agent"})
             self.assertTrue(all(row["subspace_message_id"] for row in attempts))
             self.assertTrue(all(json.loads(row["response_json"])["ok"] for row in attempts))
 
@@ -1749,28 +1790,13 @@ print(json.dumps({
                 },
             )
             calls = []
-            original_post = server_module.post_json_over_unix_socket
-
-            def fake_post(socket_path, api_path, payload):
-                calls.append(payload)
-                return {
-                    "ok": True,
-                    "results": [
-                        {
-                            "server": payload["server"],
-                            "sent": True,
-                            "subspace_message_id": "subspace-message",
-                            "idempotency_key": payload["idempotency_key"],
-                        }
-                    ],
-                }
-
-            server_module.post_json_over_unix_socket = fake_post
+            original_post = server_module.post_message_to_subspace
+            server_module.post_message_to_subspace = fake_subspace_success(calls, "subspace-message")
             server = ArgusServer(path, clock=FakeClock(NOW))
             try:
                 server.tick()
             finally:
-                server_module.post_json_over_unix_socket = original_post
+                server_module.post_message_to_subspace = original_post
                 server.close()
             attempts = rows(root / "argus.sqlite3", "publish_attempts")
             self.assertEqual({call["idempotency_key"] for call in calls}, {row["publish_idempotency_key"] for row in attempts})
@@ -1782,7 +1808,7 @@ print(json.dumps({
             self.assertTrue(all(package["supplied_embeddings"][0]["space_id"] == "openai:text-embedding-3-small:1536:v1" for package in packages))
             self.assertTrue(all(package["supplied_embeddings"][0]["vector"] == call["embeddings"][0]["vector"] for package, call in zip(packages, calls)))
 
-    def test_live_publisher_daemon_failure_records_failed_attempt(self):
+    def test_live_publisher_subspace_failure_records_failed_attempt(self):
         with TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             path = write_config(
@@ -1794,20 +1820,20 @@ print(json.dumps({
                     "require_embeddings": True,
                 },
             )
-            original_post = server_module.post_json_over_unix_socket
+            original_post = server_module.post_message_to_subspace
 
-            def fake_post(socket_path, api_path, payload):
+            def fake_post(endpoint, websocket_path, agent_id, session_token, text, embeddings, idempotency_key):
                 raise server_module.PublishTransportError(
-                    "daemon refused send",
-                    {"ok": False, "error": {"code": "subspace_unavailable", "message": "daemon refused send"}},
+                    "Subspace refused send",
+                    {"ok": False, "error": {"code": "subspace_unavailable", "message": "Subspace refused send"}},
                 )
 
-            server_module.post_json_over_unix_socket = fake_post
+            server_module.post_message_to_subspace = fake_post
             server = ArgusServer(path, clock=FakeClock(NOW))
             try:
                 server.tick()
             finally:
-                server_module.post_json_over_unix_socket = original_post
+                server_module.post_message_to_subspace = original_post
                 server.close()
             attempts = rows(root / "argus.sqlite3", "publish_attempts")
             self.assertEqual({row["status"] for row in attempts}, {"failed"})
@@ -1827,39 +1853,39 @@ print(json.dumps({
                 },
             )
             calls = []
-            original_post = server_module.post_json_over_unix_socket
+            original_post = server_module.post_message_to_subspace
 
-            def failing_post(socket_path, api_path, payload):
-                calls.append(("failed", payload["idempotency_key"]))
-                raise server_module.PublishTransportError("daemon down", {"ok": False, "error": {"message": "daemon down"}})
+            def failing_post(endpoint, websocket_path, agent_id, session_token, text, embeddings, idempotency_key):
+                calls.append(("failed", idempotency_key))
+                raise server_module.PublishTransportError("Subspace down", {"ok": False, "error": {"message": "Subspace down"}})
 
-            def succeeding_post(socket_path, api_path, payload):
-                calls.append(("succeeded", payload["idempotency_key"]))
+            def succeeding_post(endpoint, websocket_path, agent_id, session_token, text, embeddings, idempotency_key):
+                calls.append(("succeeded", idempotency_key))
                 return {
                     "ok": True,
                     "results": [
                         {
-                            "server": payload["server"],
+                            "server": endpoint,
                             "sent": True,
-                            "subspace_message_id": "msg-" + payload["idempotency_key"][-8:],
-                            "idempotency_key": payload["idempotency_key"],
+                            "subspace_message_id": "msg-" + idempotency_key[-8:],
+                            "idempotency_key": idempotency_key,
                         }
                     ],
                 }
 
             clock = FakeClock(NOW)
-            server_module.post_json_over_unix_socket = failing_post
+            server_module.post_message_to_subspace = failing_post
             server = ArgusServer(path, clock=clock)
             try:
                 server.tick()
                 first_attempts = rows(root / "argus.sqlite3", "publish_attempts")
                 self.assertEqual({row["attempt_number"] for row in first_attempts}, {1})
                 self.assertEqual({row["status"] for row in first_attempts}, {"failed"})
-                server_module.post_json_over_unix_socket = succeeding_post
+                server_module.post_message_to_subspace = succeeding_post
                 clock.advance(3600)
                 server.manual_cycle()
             finally:
-                server_module.post_json_over_unix_socket = original_post
+                server_module.post_message_to_subspace = original_post
                 server.close()
             attempts = rows(root / "argus.sqlite3", "publish_attempts")
             self.assertEqual(len(attempts), 4)
@@ -1885,20 +1911,20 @@ print(json.dumps({
                     "require_embeddings": True,
                 },
             )
-            original_post = server_module.post_json_over_unix_socket
+            original_post = server_module.post_message_to_subspace
             original_write_text = Path.write_text
             fail_summary_artifact = {"enabled": False}
 
-            def fake_post(socket_path, api_path, payload):
+            def fake_post(endpoint, websocket_path, agent_id, session_token, text, embeddings, idempotency_key):
                 fail_summary_artifact["enabled"] = True
                 return {
                     "ok": True,
                     "results": [
                         {
-                            "server": payload["server"],
+                            "server": endpoint,
                             "sent": True,
-                            "subspace_message_id": "msg-" + payload["idempotency_key"][-8:],
-                            "idempotency_key": payload["idempotency_key"],
+                            "subspace_message_id": "msg-" + idempotency_key[-8:],
+                            "idempotency_key": idempotency_key,
                         }
                     ],
                 }
@@ -1908,14 +1934,14 @@ print(json.dumps({
                     raise OSError("simulated summary artifact failure after publish")
                 return original_write_text(self, data, *args, **kwargs)
 
-            server_module.post_json_over_unix_socket = fake_post
+            server_module.post_message_to_subspace = fake_post
             Path.write_text = flaky_write_text
             server = ArgusServer(path, clock=FakeClock(NOW))
             try:
                 with self.assertRaisesRegex(OSError, "simulated summary artifact failure after publish"):
                     server.tick()
             finally:
-                server_module.post_json_over_unix_socket = original_post
+                server_module.post_message_to_subspace = original_post
                 Path.write_text = original_write_text
                 server.close()
             attempts = rows(root / "argus.sqlite3", "publish_attempts")
@@ -1930,8 +1956,8 @@ print(json.dumps({
             path = write_config(root, publish={"state": "inactive"})
             fixture = root / "feeds" / "stateful-source.xml"
             calls = []
-            original_post = server_module.post_json_over_unix_socket
-            server_module.post_json_over_unix_socket = lambda *args: calls.append(args) or {"ok": True, "results": []}
+            original_post = server_module.post_message_to_subspace
+            server_module.post_message_to_subspace = lambda *args: calls.append(args) or {"ok": True, "results": []}
             server = ArgusServer(path, clock=FakeClock(NOW))
             try:
                 server.tick()
@@ -1948,7 +1974,7 @@ print(json.dumps({
                 )
                 server.tick()
             finally:
-                server_module.post_json_over_unix_socket = original_post
+                server_module.post_message_to_subspace = original_post
                 server.close()
             self.assertEqual(calls, [])
             self.assertEqual(len(rows(root / "argus.sqlite3", "publish_attempts")), 0)
@@ -1991,14 +2017,14 @@ print(json.dumps({
                 },
             )
             calls = []
-            original_post = server_module.post_json_over_unix_socket
-            server_module.post_json_over_unix_socket = lambda *args: calls.append(args) or {"ok": True, "results": []}
+            original_post = server_module.post_message_to_subspace
+            server_module.post_message_to_subspace = lambda *args: calls.append(args) or {"ok": True, "results": []}
             server = ArgusServer(path, clock=FakeClock(NOW))
             try:
                 with self.assertRaisesRegex(Exception, "canary publish limit exceeded"):
                     server.manual_cycle(max_live_publishes=1)
             finally:
-                server_module.post_json_over_unix_socket = original_post
+                server_module.post_message_to_subspace = original_post
                 server.close()
             self.assertEqual(calls, [])
             self.assertEqual(len(rows(root / "argus.sqlite3", "publish_attempts")), 0)
@@ -2018,15 +2044,15 @@ print(json.dumps({
                 schedule={"max_live_publishes_per_tick": 1},
             )
             calls = []
-            original_post = server_module.post_json_over_unix_socket
-            server_module.post_json_over_unix_socket = lambda *args: calls.append(args) or {"ok": True, "results": []}
+            original_post = server_module.post_message_to_subspace
+            server_module.post_message_to_subspace = lambda *args: calls.append(args) or {"ok": True, "results": []}
             server = ArgusServer(path, clock=FakeClock(NOW))
             try:
                 with self.assertRaisesRegex(Exception, "canary publish limit exceeded"):
                     server.tick()
                 state = dict(server.connection.execute("SELECT * FROM scheduler_state WHERE id = 1").fetchone())
             finally:
-                server_module.post_json_over_unix_socket = original_post
+                server_module.post_message_to_subspace = original_post
                 server.close()
             self.assertEqual(state["max_live_publishes_per_tick"], 1)
             self.assertEqual(calls, [])
@@ -2040,35 +2066,45 @@ print(json.dumps({
             with self.assertRaisesRegex(Exception, "Invalid schedule.max_live_publishes_per_tick"):
                 load_runtime_config(path)
 
-    def test_daemon_chunked_response_and_missing_message_id_failure(self):
-        ok_response = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n4\r\n{\"ok\r\n14\r\n\":true,\"results\":[]}\r\n0\r\n\r\n"
-        original_socket = server_module.socket.socket
+    def test_direct_subspace_websocket_publish_and_missing_message_id_failure(self):
+        class FakeConnection:
+            def __init__(self):
+                self.sent = []
+                self.closed = False
+                self.replies = [
+                    json.dumps(["1", "1", "firehose", "phx_reply", {"status": "ok", "response": {}}]),
+                    json.dumps(["1", "2", "firehose", "phx_reply", {"status": "ok", "response": {"id": "subspace-message"}}]),
+                ]
 
-        class FakeSocket:
-            def __init__(self, *args, **kwargs):
-                self._chunks = [ok_response, b""]
+            def send(self, payload):
+                self.sent.append(json.loads(payload))
 
-            def settimeout(self, timeout):
-                self.timeout = timeout
-
-            def connect(self, path):
-                self.path = path
-
-            def sendall(self, request):
-                self.request = request
-
-            def recv(self, size):
-                return self._chunks.pop(0)
+            def recv(self):
+                return self.replies.pop(0)
 
             def close(self):
-                pass
+                self.closed = True
 
-        server_module.socket.socket = FakeSocket
-        try:
-            response = server_module.post_json_over_unix_socket(Path("/tmp/daemon.sock"), "/v1/messages", {"text": "x"})
-        finally:
-            server_module.socket.socket = original_socket
-        self.assertEqual(response, {"ok": True, "results": []})
+        fake = FakeConnection()
+        urls = []
+        response = server_module.post_message_to_subspace(
+            "https://subspace.swarm.channel",
+            "/api/firehose/stream/websocket",
+            "argus-agent",
+            "session-token",
+            '{"schema":"swarm.channel.news.report.v0"}',
+            [{"space_id": "openai:text-embedding-3-small:1536:v1", "vector": [0.1]}],
+            "stable-key",
+            create_connection=lambda url, timeout: urls.append((url, timeout)) or fake,
+        )
+        self.assertEqual(urls, [("wss://subspace.swarm.channel/api/firehose/stream/websocket?vsn=2.0.0", 10)])
+        self.assertTrue(fake.closed)
+        self.assertEqual(fake.sent[0][2:4], ["firehose", "phx_join"])
+        self.assertEqual(fake.sent[0][4], {"agent_id": "argus-agent", "session_token": "session-token"})
+        self.assertEqual(fake.sent[1][2:4], ["firehose", "post_message"])
+        self.assertEqual(fake.sent[1][4]["idempotency_key"], "stable-key")
+        self.assertEqual(response["transport"], "subspace_websocket")
+        self.assertEqual(server_module.subspace_message_id_from_response(response), "subspace-message")
 
         with TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -2081,17 +2117,17 @@ print(json.dumps({
                     "require_embeddings": True,
                 },
             )
-            original_post = server_module.post_json_over_unix_socket
-            server_module.post_json_over_unix_socket = lambda *args: {"ok": True, "results": []}
+            original_post = server_module.post_message_to_subspace
+            server_module.post_message_to_subspace = lambda *args: {"ok": True, "results": []}
             server = ArgusServer(path, clock=FakeClock(NOW))
             try:
                 server.tick()
             finally:
-                server_module.post_json_over_unix_socket = original_post
+                server_module.post_message_to_subspace = original_post
                 server.close()
             attempts = rows(root / "argus.sqlite3", "publish_attempts")
             self.assertEqual({row["status"] for row in attempts}, {"failed"})
-            self.assertEqual({row["error_message"] for row in attempts}, {"daemon response missing subspace_message_id"})
+            self.assertEqual({row["error_message"] for row in attempts}, {"Subspace response missing subspace_message_id"})
 
     def test_spec_named_cli_backend_invokes_embedding_command(self):
         with TemporaryDirectory() as tmpdir:

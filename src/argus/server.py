@@ -6,7 +6,6 @@ import json
 import os
 import re
 import signal
-import socket
 import sqlite3
 import subprocess
 import tempfile
@@ -14,6 +13,7 @@ import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
+from urllib.parse import urlparse, urlunparse
 
 import yaml
 import requests
@@ -28,8 +28,10 @@ SOURCE_ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
 SOURCE_CLASSES = {"official", "research", "editorial", "community", "adapter"}
 FEED_ADAPTERS = {"rss", "atom"}
 API_ADAPTERS = {"api", "arxiv_atom"}
-DEFAULT_SUBSPACE_DAEMON_SOCKET = "~/.openclaw/subspace-daemon/daemon.sock"
-DEFAULT_SUBSPACE_DAEMON_API_PATH = "/v1/messages"
+DEFAULT_SUBSPACE_WEBSOCKET_PATH = "/api/firehose/stream/websocket"
+DEFAULT_SUBSPACE_AGENT_ID_ENV = "ARGUS_SUBSPACE_AGENT_ID"
+DEFAULT_SUBSPACE_SESSION_TOKEN_ENV = "ARGUS_SUBSPACE_SESSION_TOKEN"
+LEGACY_DAEMON_PUBLISH_KEYS = {"subspace_daemon_socket", "daemon_socket_path", "subspace_daemon_api_path", "daemon_api_path"}
 OPENAI_EMBEDDING_PROVIDER = "openai"
 OPENAI_EMBEDDING_MODEL = "text-embedding-3-small"
 OPENAI_EMBEDDING_DIMENSIONS = 1536
@@ -51,8 +53,9 @@ class PublishConfig:
     state: str = "inactive"
     live_approval: bool = False
     subspace_endpoint: Optional[str] = None
-    subspace_daemon_socket: str = DEFAULT_SUBSPACE_DAEMON_SOCKET
-    subspace_daemon_api_path: str = DEFAULT_SUBSPACE_DAEMON_API_PATH
+    subspace_agent_id: Optional[str] = None
+    subspace_session_token: Optional[str] = None
+    subspace_websocket_path: str = DEFAULT_SUBSPACE_WEBSOCKET_PATH
     require_embeddings: bool = True
     allow_non_embedded_fallback: bool = False
 
@@ -205,6 +208,28 @@ def validate_scheduler(payload: Dict[str, Any]) -> SchedulerConfig:
     )
 
 
+def publish_config_from_payload(payload: Dict[str, Any]) -> PublishConfig:
+    legacy_keys = sorted(key for key in LEGACY_DAEMON_PUBLISH_KEYS if key in payload)
+    if legacy_keys:
+        raise PipelineError(
+            "Invalid publish config: Argus publishes directly to Subspace; remove legacy publish topology fields: {}".format(
+                ", ".join(legacy_keys)
+            )
+        )
+    if "subspace_session_token" in payload:
+        raise PipelineError("publish.subspace_session_token must be supplied via ARGUS_SUBSPACE_SESSION_TOKEN")
+    return PublishConfig(
+        state=str(payload.get("state", "inactive")),
+        live_approval=bool(payload.get("live_approval", False)),
+        subspace_endpoint=(str(payload["subspace_endpoint"]) if payload.get("subspace_endpoint") else None),
+        subspace_agent_id=(str(payload["subspace_agent_id"]) if payload.get("subspace_agent_id") else os.environ.get(DEFAULT_SUBSPACE_AGENT_ID_ENV)),
+        subspace_session_token=os.environ.get(DEFAULT_SUBSPACE_SESSION_TOKEN_ENV),
+        subspace_websocket_path=str(payload.get("subspace_websocket_path") or DEFAULT_SUBSPACE_WEBSOCKET_PATH),
+        require_embeddings=bool(payload.get("require_embeddings", True)),
+        allow_non_embedded_fallback=bool(payload.get("allow_non_embedded_fallback", False)),
+    )
+
+
 def source_from_runtime(row: Dict[str, Any]) -> SourceConfig:
     source_id = str(row["id"])
     if not SOURCE_ID_RE.match(source_id):
@@ -291,15 +316,7 @@ def load_runtime_config(path: Path) -> RuntimeConfig:
         raise PipelineError("at least one enabled source is required")
     publish_payload = payload.get("publish") or {}
     embedding_payload = payload.get("embedding") or {}
-    publish = PublishConfig(
-        state=str(publish_payload.get("state", "inactive")),
-        live_approval=bool(publish_payload.get("live_approval", False)),
-        subspace_endpoint=(str(publish_payload["subspace_endpoint"]) if publish_payload.get("subspace_endpoint") else None),
-        subspace_daemon_socket=str(publish_payload.get("subspace_daemon_socket") or publish_payload.get("daemon_socket_path") or DEFAULT_SUBSPACE_DAEMON_SOCKET),
-        subspace_daemon_api_path=str(publish_payload.get("subspace_daemon_api_path") or publish_payload.get("daemon_api_path") or DEFAULT_SUBSPACE_DAEMON_API_PATH),
-        require_embeddings=bool(publish_payload.get("require_embeddings", True)),
-        allow_non_embedded_fallback=bool(publish_payload.get("allow_non_embedded_fallback", False)),
-    )
+    publish = publish_config_from_payload(publish_payload)
     if publish.state not in {"inactive", "active"}:
         raise PipelineError("Invalid publish.state: {}".format(publish.state))
     embedding = EmbeddingConfig(
@@ -632,6 +649,9 @@ def build_publish_snapshot(config: RuntimeConfig, observed_at: datetime, force_i
         elif not config.publish.subspace_endpoint:
             effective = "blocked"
             blocked_reason = "missing_subspace_endpoint"
+        elif not config.publish.subspace_agent_id or not config.publish.subspace_session_token:
+            effective = "blocked"
+            blocked_reason = "missing_subspace_credentials"
         elif config.scheduler.max_live_publishes_per_tick is None:
             effective = "blocked"
             blocked_reason = "missing_live_publish_cap"
@@ -879,7 +899,7 @@ class PublishTransportError(PipelineError):
         self.response = response
 
 
-def canonical_embedding_for_daemon(supplied_embedding: Dict[str, Any]) -> Dict[str, Any]:
+def canonical_embedding_for_subspace(supplied_embedding: Dict[str, Any]) -> Dict[str, Any]:
     return {
         "space_id": supplied_embedding.get("space_id"),
         "vector": supplied_embedding.get("vector") or [],
@@ -893,76 +913,110 @@ def subspace_message_id_from_response(response: Dict[str, Any]) -> Optional[str]
     return None
 
 
-def post_json_over_unix_socket(socket_path: Path, api_path: str, payload: Dict[str, Any]) -> Dict[str, Any]:
-    encoded = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
-    request = (
-        "POST {} HTTP/1.1\r\n"
-        "Host: localhost\r\n"
-        "Content-Type: application/json\r\n"
-        "Content-Length: {}\r\n"
-        "Connection: close\r\n"
-        "\r\n"
-    ).format(api_path, len(encoded)).encode("utf-8") + encoded
-    try:
-        client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        client.settimeout(10)
+def subspace_websocket_url(endpoint: str, websocket_path: str) -> str:
+    parsed = urlparse(endpoint)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise PublishTransportError("invalid Subspace endpoint: {}".format(endpoint))
+    scheme = "wss" if parsed.scheme == "https" else "ws"
+    endpoint_path = parsed.path.rstrip("/")
+    publish_path = "/" + websocket_path.lstrip("/")
+    path = endpoint_path + publish_path if endpoint_path else publish_path
+    return urlunparse((scheme, parsed.netloc, path, "", "vsn=2.0.0", ""))
+
+
+def _read_phoenix_reply(connection: Any, expected_ref: str, operation: str, max_frames: int = 100) -> Dict[str, Any]:
+    for _ in range(max_frames):
+        raw = connection.recv()
         try:
-            client.connect(str(socket_path))
-            client.sendall(request)
-            chunks = []
-            while True:
-                chunk = client.recv(65536)
-                if not chunk:
-                    break
-                chunks.append(chunk)
-        finally:
-            client.close()
-    except OSError as exc:
-        raise PublishTransportError(str(exc)) from exc
-    raw = b"".join(chunks)
-    header_bytes, _, body_bytes = raw.partition(b"\r\n\r\n")
-    status_line = header_bytes.splitlines()[0].decode("utf-8", errors="replace") if header_bytes else ""
-    try:
-        status = int(status_line.split()[1])
-    except (IndexError, ValueError):
-        raise PublishTransportError("invalid daemon response")
-    headers: Dict[str, str] = {}
-    for line in header_bytes.splitlines()[1:]:
-        name, separator, value = line.partition(b":")
-        if separator:
-            headers[name.decode("ascii", errors="ignore").lower()] = value.decode("ascii", errors="ignore").strip()
-    if headers.get("transfer-encoding", "").lower() == "chunked":
-        decoded = bytearray()
-        remaining = body_bytes
-        while True:
-            line, separator, remaining = remaining.partition(b"\r\n")
-            if not separator:
-                raise PublishTransportError("invalid chunked daemon response")
-            try:
-                size = int(line.split(b";", 1)[0], 16)
-            except ValueError as exc:
-                raise PublishTransportError("invalid chunked daemon response") from exc
-            if size == 0:
-                body_bytes = bytes(decoded)
-                break
-            if len(remaining) < size + 2:
-                raise PublishTransportError("invalid chunked daemon response")
-            decoded.extend(remaining[:size])
-            remaining = remaining[size + 2 :]
-    elif headers.get("content-length"):
-        try:
-            body_bytes = body_bytes[: int(headers["content-length"])]
+            frame = json.loads(raw)
         except ValueError as exc:
-            raise PublishTransportError("invalid daemon content-length") from exc
+            raise PublishTransportError("invalid Subspace websocket frame") from exc
+        if not isinstance(frame, list) or len(frame) != 5:
+            continue
+        _join_ref, ref, _topic, event, payload = frame
+        if ref != expected_ref or event != "phx_reply":
+            continue
+        if not isinstance(payload, dict):
+            raise PublishTransportError("invalid Subspace {} reply".format(operation))
+        if payload.get("status") != "ok":
+            response = {"ok": False, "reply": payload}
+            message = payload.get("response", {}).get("reason") if isinstance(payload.get("response"), dict) else None
+            raise PublishTransportError(message or "Subspace {} failed".format(operation), response)
+        return payload
+    raise PublishTransportError("Subspace {} reply not received".format(operation))
+
+
+def post_message_to_subspace(
+    endpoint: str,
+    websocket_path: str,
+    agent_id: str,
+    session_token: str,
+    text: str,
+    embeddings: List[Dict[str, Any]],
+    idempotency_key: str,
+    *,
+    timeout: int = 10,
+    create_connection: Optional[Callable[..., Any]] = None,
+) -> Dict[str, Any]:
+    if create_connection is None:
+        try:
+            import websocket  # type: ignore
+        except ImportError as exc:
+            raise PublishTransportError("websocket-client dependency is unavailable") from exc
+        create_connection = websocket.create_connection
+    url = subspace_websocket_url(endpoint, websocket_path)
     try:
-        body = json.loads(body_bytes.decode("utf-8")) if body_bytes.strip() else {}
-    except ValueError as exc:
-        raise PublishTransportError("invalid daemon JSON response") from exc
-    if status < 200 or status >= 300 or not body.get("ok"):
-        error = body.get("error") if isinstance(body.get("error"), dict) else {}
-        message = error.get("message") or "daemon publish failed"
-        raise PublishTransportError(str(message), body)
-    return body
+        connection = create_connection(url, timeout=timeout)
+    except Exception as exc:
+        raise PublishTransportError("Subspace websocket connection failed: {}".format(exc)) from exc
+    try:
+        join_ref = "1"
+        post_ref = "2"
+        connection.send(
+            json.dumps(
+                [join_ref, join_ref, "firehose", "phx_join", {"agent_id": agent_id, "session_token": session_token}],
+                separators=(",", ":"),
+            )
+        )
+        _read_phoenix_reply(connection, join_ref, "join")
+        connection.send(
+            json.dumps(
+                [
+                    join_ref,
+                    post_ref,
+                    "firehose",
+                    "post_message",
+                    {"text": text, "embeddings": embeddings, "idempotency_key": idempotency_key},
+                ],
+                separators=(",", ":"),
+            )
+        )
+        reply = _read_phoenix_reply(connection, post_ref, "post_message")
+    except PublishTransportError:
+        raise
+    except Exception as exc:
+        raise PublishTransportError("Subspace websocket publish failed: {}".format(exc)) from exc
+    finally:
+        try:
+            connection.close()
+        except Exception:
+            pass
+    response = reply.get("response") if isinstance(reply.get("response"), dict) else {}
+    message_id = response.get("id")
+    if not message_id:
+        raise PublishTransportError("Subspace response missing subspace_message_id", {"ok": True, "reply": reply})
+    return {
+        "ok": True,
+        "transport": "subspace_websocket",
+        "results": [
+            {
+                "server": endpoint,
+                "sent": True,
+                "subspace_message_id": message_id,
+                "idempotency_key": idempotency_key,
+            }
+        ],
+    }
 
 
 class ArgusServer:
@@ -1126,15 +1180,10 @@ class ArgusServer:
             return False
         publish_payload = payload.get("publish") or {}
         embedding_payload = payload.get("embedding") or {}
-        publish = PublishConfig(
-            state=str(publish_payload.get("state", "inactive")),
-            live_approval=bool(publish_payload.get("live_approval", False)),
-            subspace_endpoint=(str(publish_payload["subspace_endpoint"]) if publish_payload.get("subspace_endpoint") else None),
-            subspace_daemon_socket=str(publish_payload.get("subspace_daemon_socket") or publish_payload.get("daemon_socket_path") or DEFAULT_SUBSPACE_DAEMON_SOCKET),
-            subspace_daemon_api_path=str(publish_payload.get("subspace_daemon_api_path") or publish_payload.get("daemon_api_path") or DEFAULT_SUBSPACE_DAEMON_API_PATH),
-            require_embeddings=bool(publish_payload.get("require_embeddings", True)),
-            allow_non_embedded_fallback=bool(publish_payload.get("allow_non_embedded_fallback", False)),
-        )
+        try:
+            publish = publish_config_from_payload(publish_payload)
+        except PipelineError:
+            return False
         embedding = EmbeddingConfig(
             backend=(str(embedding_payload["backend"]) if embedding_payload.get("backend") else None),
             command=(str(embedding_payload["command"]) if embedding_payload.get("command") else None),
@@ -2011,7 +2060,7 @@ class ArgusServer:
                 response = self._publish_package_to_subspace(package_payload, key, supplied_embeddings)
                 message_id = subspace_message_id_from_response(response)
                 if not message_id:
-                    raise PublishTransportError("daemon response missing subspace_message_id", response)
+                    raise PublishTransportError("Subspace response missing subspace_message_id", response)
                 self.connection.execute(
                     """
                     UPDATE publish_attempts
@@ -2036,16 +2085,14 @@ class ArgusServer:
         return package_payloads
 
     def _publish_package_to_subspace(self, package_payload: Dict[str, Any], idempotency_key: str, supplied_embedding: Dict[str, Any]) -> Dict[str, Any]:
-        request = {
-            "server": self.config.publish.subspace_endpoint,
-            "text": json.dumps(package_payload, sort_keys=True, separators=(",", ":")),
-            "idempotency_key": idempotency_key,
-            "embeddings": [canonical_embedding_for_daemon(supplied_embedding)] if supplied_embedding else [],
-        }
-        return post_json_over_unix_socket(
-            Path(os.path.expanduser(self.config.publish.subspace_daemon_socket)),
-            self.config.publish.subspace_daemon_api_path,
-            request,
+        return post_message_to_subspace(
+            str(self.config.publish.subspace_endpoint),
+            self.config.publish.subspace_websocket_path,
+            str(self.config.publish.subspace_agent_id),
+            str(self.config.publish.subspace_session_token),
+            json.dumps(package_payload, sort_keys=True, separators=(",", ":")),
+            [canonical_embedding_for_subspace(supplied_embedding)] if supplied_embedding else [],
+            idempotency_key,
         )
 
     def _store_normalized_storage(self, run_id: str, now: datetime, output_dir: Path, accepted_report_ids: Optional[set[str]]) -> set[str]:
