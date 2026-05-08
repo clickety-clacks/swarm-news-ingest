@@ -25,6 +25,7 @@ delivery:
   max_retry_delay: 15m
   live_send_concurrency: 1
   min_slot: 1m
+  max_messages_per_plan: 20
 
 embedding:
   backend: openai

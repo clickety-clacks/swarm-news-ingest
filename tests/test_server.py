@@ -236,6 +236,7 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(config.delivery.max_retry_delay_seconds, 900)
         self.assertEqual(config.delivery.live_send_concurrency, 1)
         self.assertEqual(config.delivery.min_slot_seconds, 60)
+        self.assertEqual(config.delivery.max_messages_per_plan, 20)
         self.assertEqual(config.source_fetch_concurrency, 4)
         self.assertEqual(config.publish.mode, "inactive")
         self.assertTrue(config.publish.require_embeddings)
@@ -275,6 +276,7 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(config.scheduler.mode, "manual")
         self.assertEqual(config.delivery.mode, "tranche")
         self.assertEqual(config.delivery.min_slot_seconds, 60)
+        self.assertEqual(config.delivery.max_messages_per_plan, 20)
         self.assertEqual(config.source_fetch_concurrency, 1)
         self.assertEqual(config.publish.mode, "inactive")
         self.assertEqual(config.publish.subspace_endpoint, "https://subspace.swarm.channel")
@@ -2204,6 +2206,59 @@ print(json.dumps({
             self.assertEqual(len(rows(root / "argus.sqlite3", "delivery_entries")), 2)
             self.assertEqual(len([row for row in rows(root / "argus.sqlite3", "skipped_items") if row["reason_code"] == "delivery_density_exceeded"]), 0)
 
+    def test_tranche_max_messages_guard_stops_before_plan_or_send(self):
+        def feed_xml(count):
+            body = ["<?xml version=\"1.0\" encoding=\"UTF-8\"?>", "<rss><channel><title>Large Source</title>"]
+            for idx in range(1, count + 1):
+                body.append(
+                    "<item><guid>large-guid-{}</guid><title>Large Story {}</title><link>https://large.example/story-{}</link><pubDate>Wed, 30 Apr 2026 10:{:02d}:00 +0000</pubDate><description>Story {}</description></item>".format(
+                        idx, idx, idx, idx, idx
+                    )
+                )
+            body.append("</channel></rss>")
+            return "\n".join(body)
+
+        with TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            path = write_config(
+                root,
+                interval="2h",
+                publish={
+                    "mode": "live",
+                    "subspace_endpoint": "https://subspace.swarm.channel",
+                    "require_embeddings": True,
+                },
+                schedule={"max_live_publishes_per_tick": 21},
+            )
+            (root / "feeds" / "stateful-source.xml").write_text(feed_xml(21))
+            calls = []
+            original_post = server_module.post_message_to_subspace
+            server_module.post_message_to_subspace = fake_subspace_success(calls)
+            server = ArgusServer(path, clock=FakeClock(NOW))
+            try:
+                with self.assertRaisesRegex(Exception, "delivery_max_messages_exceeded"):
+                    server.tick()
+                config = yaml.safe_load(path.read_text())
+                config["schedule"]["max_live_publishes_per_tick"] = 20
+                path.write_text(yaml.safe_dump(config))
+                server.reload()
+                server.tick()
+            finally:
+                server_module.post_message_to_subspace = original_post
+                server.close()
+            self.assertEqual(len(calls), 1)
+            self.assertEqual(len(rows(root / "argus.sqlite3", "accepted_reports")), 21)
+            self.assertEqual(len(rows(root / "argus.sqlite3", "packages")), 21)
+            self.assertEqual(len(rows(root / "argus.sqlite3", "delivery_plans")), 1)
+            self.assertEqual(len(rows(root / "argus.sqlite3", "delivery_entries")), 20)
+            self.assertEqual(len(rows(root / "argus.sqlite3", "publish_attempts")), 1)
+            self.assertEqual(len([row for row in rows(root / "argus.sqlite3", "skipped_items") if row["reason_code"] == "over_live_publish_budget"]), 1)
+            failed_runs = [row for row in rows(root / "argus.sqlite3", "runs") if row["status"] == "failed"]
+            self.assertEqual(len(failed_runs), 1)
+            failed_summary = json.loads(failed_runs[0]["summary_json"])
+            self.assertIn("delivery_max_messages_exceeded", failed_summary["post_pipeline_error"]["message"])
+            self.assertIn("max_messages_per_plan=20", failed_summary["post_pipeline_error"]["message"])
+
     def test_delivery_immediate_mode_drains_selected_work_in_one_cycle(self):
         with TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -2632,6 +2687,26 @@ print(json.dumps({
             root = Path(tmpdir)
             path = write_config(root, schedule={"max_live_publishes_per_tick": -1})
             with self.assertRaisesRegex(Exception, "Invalid schedule.max_live_publishes_per_tick"):
+                load_runtime_config(path)
+
+    def test_delivery_max_messages_per_plan_config_parses_and_rejects_invalid_values(self):
+        with TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            path = write_config(root)
+            config = yaml.safe_load(path.read_text())
+            config["delivery"] = {
+                "mode": "tranche",
+                "manual_window": "1h",
+                "max_retry_delay": "15m",
+                "live_send_concurrency": 1,
+                "min_slot": "1m",
+                "max_messages_per_plan": 7,
+            }
+            path.write_text(yaml.safe_dump(config))
+            self.assertEqual(load_runtime_config(path).delivery.max_messages_per_plan, 7)
+            config["delivery"]["max_messages_per_plan"] = 0
+            path.write_text(yaml.safe_dump(config))
+            with self.assertRaisesRegex(Exception, "Invalid delivery.max_messages_per_plan"):
                 load_runtime_config(path)
 
     def test_direct_subspace_websocket_publish_and_missing_message_id_failure(self):

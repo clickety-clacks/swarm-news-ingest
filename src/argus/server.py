@@ -66,6 +66,7 @@ class DeliveryConfig:
     max_retry_delay_seconds: int = 15 * 60
     live_send_concurrency: int = 1
     min_slot_seconds: int = 60
+    max_messages_per_plan: int = 20
 
 
 @dataclasses.dataclass(frozen=True)
@@ -225,6 +226,10 @@ def validate_delivery(payload: Dict[str, Any]) -> DeliveryConfig:
     max_retry_delay_seconds = parse_duration_seconds(payload.get("max_retry_delay", "15m"))
     min_slot_seconds = parse_duration_seconds(payload.get("min_slot", "1m"))
     try:
+        max_messages_per_plan = int(payload.get("max_messages_per_plan", 20))
+    except (TypeError, ValueError):
+        raise PipelineError("Invalid delivery.max_messages_per_plan: {}".format(payload.get("max_messages_per_plan")))
+    try:
         live_send_concurrency = int(payload.get("live_send_concurrency", 1))
     except (TypeError, ValueError):
         raise PipelineError("Invalid delivery.live_send_concurrency: {}".format(payload.get("live_send_concurrency")))
@@ -234,6 +239,8 @@ def validate_delivery(payload: Dict[str, Any]) -> DeliveryConfig:
         raise PipelineError("Invalid delivery.max_retry_delay: {}".format(payload.get("max_retry_delay")))
     if min_slot_seconds <= 0:
         raise PipelineError("Invalid delivery.min_slot: {}".format(payload.get("min_slot")))
+    if max_messages_per_plan <= 0:
+        raise PipelineError("Invalid delivery.max_messages_per_plan: {}".format(payload.get("max_messages_per_plan")))
     if live_send_concurrency != 1:
         raise PipelineError("Invalid delivery.live_send_concurrency: {}".format(live_send_concurrency))
     return DeliveryConfig(
@@ -242,6 +249,7 @@ def validate_delivery(payload: Dict[str, Any]) -> DeliveryConfig:
         max_retry_delay_seconds=max_retry_delay_seconds,
         live_send_concurrency=live_send_concurrency,
         min_slot_seconds=min_slot_seconds,
+        max_messages_per_plan=max_messages_per_plan,
     )
 
 
@@ -2213,6 +2221,14 @@ class ArgusServer:
         window_end = configured_window_end if configured_window_end > window_start else window_start
         plan_id = "sha256:" + hashlib.sha256(("delivery-plan:v0\n{}\n{}".format(run_id, target)).encode("utf-8")).hexdigest()
         duration = max(0.0, (window_end - window_start).total_seconds())
+        if self.config.delivery.mode == "tranche" and len(selected) > self.config.delivery.max_messages_per_plan:
+            raise PipelineError(
+                "delivery_max_messages_exceeded: selected_count={} exceeds max_messages_per_plan={} for window_seconds={}".format(
+                    len(selected),
+                    self.config.delivery.max_messages_per_plan,
+                    int(duration),
+                )
+            )
         slot_width = duration / len(selected) if selected and duration > 0 else 0
         if self.config.delivery.mode == "tranche" and len(selected) > 1 and duration > 0 and slot_width < self.config.delivery.min_slot_seconds:
             max_items_for_window = int(duration // self.config.delivery.min_slot_seconds)
