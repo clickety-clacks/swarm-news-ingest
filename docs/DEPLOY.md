@@ -227,6 +227,10 @@ Argus treats `export.arxiv.org` as a polite-fetch source. arXiv Atom requests ar
 
 Deferred arXiv fetches preserve existing source state and are retried on a later eligible cycle. Operators should still inspect `argus source-health --db /var/lib/argus/argus.sqlite3` for repeated `deferred` arXiv rows before changing source cadence.
 
+## Cross-source dedupe
+
+Argus prefers false negatives over false positives for dedupe. Normalized canonical URL equality is the conservative cross-source collapse key; if two feeds carry the same canonical URL, only one package is created, and the package `provenance.carried_by` list records each source/feed that carried the story. RSS GUIDs are not semantic story identity: they are source-local replay bookkeeping only when URL evidence is unavailable, and matching GUIDs across unrelated feeds do not collapse unless a future explicit publisher/domain rule says they are safe. If GUID evidence conflicts with canonical URL or title evidence, Argus keeps both items and records the ambiguity instead of suppressing one.
+
 ## Controlled Subetha/Subspace E2E canary
 
 Do not run a live E2E send without explicit Flynn approval. Active publish is externally visible.

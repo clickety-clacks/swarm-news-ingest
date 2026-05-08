@@ -101,7 +101,7 @@ Server mode keeps RSS-reader-style per-source state in SQLite so recurring runs 
 State includes:
 
 - HTTP validators per source (`ETag`, `Last-Modified`) sent back as `If-None-Match` / `If-Modified-Since`
-- persistent seen-item identities per source using feed GUID/id first, canonical URL second, and normalized title + date bucket as fallback
+- persistent seen-item identities per source using canonical URL first, feed GUID/id only when URL evidence is unavailable, and normalized title + date bucket as fallback
 
 If a source returns `304 Not Modified`, Argus records that as a healthy no-change source health result and emits no new candidates for that source.
 

@@ -702,6 +702,24 @@ def apply_migrations(connection: sqlite3.Connection) -> None:
     scheduler_columns = {row["name"] for row in connection.execute("PRAGMA table_info(scheduler_state)")}
     if "max_live_publishes_per_tick" not in scheduler_columns:
         connection.execute("ALTER TABLE scheduler_state ADD COLUMN max_live_publishes_per_tick INTEGER")
+    for row in connection.execute(
+        """
+        SELECT report_id, source_id, canonical_url
+        FROM normalized_reports
+        WHERE canonical_url IS NOT NULL AND canonical_url != ''
+        """
+    ).fetchall():
+        source_scope = "source:{}".format(row["source_id"])
+        source_hash = dedupe_key_hash(source_scope, "canonical_url", row["canonical_url"])
+        global_hash = dedupe_key_hash("global:canonical_url", "canonical_url", row["canonical_url"])
+        connection.execute(
+            "INSERT OR IGNORE INTO dedupe_keys VALUES (?, ?, ?, ?, ?)",
+            (source_scope, "canonical_url", source_hash, row["report_id"], row["canonical_url"]),
+        )
+        connection.execute(
+            "INSERT OR IGNORE INTO dedupe_keys VALUES (?, ?, ?, ?, ?)",
+            ("global:canonical_url", "canonical_url", global_hash, row["report_id"], row["canonical_url"]),
+        )
     connection.commit()
 
 
@@ -860,13 +878,27 @@ def is_scheduler_reload_error(exc: Exception) -> bool:
     return text.startswith("Invalid schedule.") or text.startswith("schedule.")
 
 
+def dedupe_key_hash(key_scope: str, key_type: str, normalized_key_value: str) -> str:
+    return "sha256:" + hashlib.sha256("dedupe:v0\n{}\n{}\n{}".format(key_scope, key_type, normalized_key_value).encode("utf-8")).hexdigest()
+
+
+def dedupe_key_precedence(key_type: Optional[str]) -> Optional[int]:
+    if key_type == "canonical_url":
+        return 1
+    if key_type == "feed_entry_id":
+        return 2
+    if key_type == "normalized_title_date":
+        return 3
+    return None
+
+
 def selected_dedupe_key_for_report(report: Dict[str, Any]) -> Tuple[str, str, str, str]:
-    if report.get("feed_entry_id"):
-        key_type = "feed_entry_id"
-        normalized_key_value = normalize_feed_entry_id(report["feed_entry_id"])
-    elif report.get("canonical_url"):
+    if report.get("canonical_url"):
         key_type = "canonical_url"
         normalized_key_value = report["canonical_url"]
+    elif report.get("feed_entry_id"):
+        key_type = "feed_entry_id"
+        normalized_key_value = normalize_feed_entry_id(report["feed_entry_id"])
     elif not normalize_title(report["title"]):
         key_type = "missing_identity_key"
         normalized_key_value = ""
@@ -874,8 +906,18 @@ def selected_dedupe_key_for_report(report: Dict[str, Any]) -> Tuple[str, str, st
         key_type = "normalized_title_date"
         normalized_key_value = "{}\n{}".format(normalize_title(report["title"]), date_bucket(report.get("published_at") or report.get("fetched_at")))
     key_scope = "source:{}".format(report["source_id"])
-    key_hash = "sha256:" + hashlib.sha256("dedupe:v0\n{}\n{}\n{}".format(key_scope, key_type, normalized_key_value).encode("utf-8")).hexdigest()
+    key_hash = dedupe_key_hash(key_scope, key_type, normalized_key_value)
     return key_type, key_scope, normalized_key_value, key_hash
+
+
+def cross_source_canonical_key_for_report(report: Dict[str, Any]) -> Optional[Tuple[str, str, str, str]]:
+    canonical_url = report.get("canonical_url")
+    if not canonical_url:
+        return None
+    key_type = "canonical_url"
+    key_scope = "global:canonical_url"
+    key_hash = dedupe_key_hash(key_scope, key_type, canonical_url)
+    return key_type, key_scope, canonical_url, key_hash
 
 
 def canonical_embedding_record(candidate: Dict[str, Any]) -> Dict[str, Any]:
@@ -932,13 +974,40 @@ def request_openai_embedding(text: str, model: str, dimensions: int, api_key: st
     return payload
 
 
-def package_payload_for(candidate: Dict[str, Any], package_id: str) -> Dict[str, Any]:
+def carrier_provenance_for_candidate(candidate: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "source_id": candidate["source_id"],
+        "source_name": candidate["source_name"],
+        "source_class": candidate["source_class"],
+        "feed_url": candidate.get("provenance", {}).get("feed_url"),
+        "feed_guid": candidate.get("feed_entry_id"),
+        "raw_url": candidate.get("raw_url"),
+        "canonical_url": candidate["canonical_url"],
+        "fetched_at": candidate["fetched_at"],
+    }
+
+
+def merge_carrier_lists(*carrier_lists: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    carriers: List[Dict[str, Any]] = []
+    seen = set()
+    for carrier_list in carrier_lists:
+        for carrier in carrier_list:
+            key = (carrier.get("source_id"), carrier.get("feed_guid"), carrier.get("canonical_url"))
+            if key in seen:
+                continue
+            carriers.append(carrier)
+            seen.add(key)
+    return carriers
+
+
+def package_payload_for(candidate: Dict[str, Any], package_id: str, carried_by: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
     selected_key_type = candidate.get("dedupe_identity", {}).get("primary")
     selected_key_value = candidate.get("dedupe_identity", {}).get("value")
-    selected_key_scope = "source:{}".format(candidate["source_id"])
+    selected_key_scope = "global:canonical_url" if selected_key_type == "canonical_url" else "source:{}".format(candidate["source_id"])
     selected_key_hash = None
     if selected_key_type and selected_key_value is not None:
-        selected_key_hash = "sha256:" + hashlib.sha256("dedupe:v0\n{}\n{}\n{}".format(selected_key_scope, selected_key_type, selected_key_value).encode("utf-8")).hexdigest()
+        selected_key_hash = dedupe_key_hash(selected_key_scope, selected_key_type, selected_key_value)
+    carriers = carried_by or [carrier_provenance_for_candidate(candidate)]
     return {
         "schema": "swarm.channel.news.report.v0",
         "package_id": package_id,
@@ -957,6 +1026,7 @@ def package_payload_for(candidate: Dict[str, Any], package_id: str) -> Dict[str,
             "raw_url": candidate.get("raw_url"),
             "canonical_url": candidate["canonical_url"],
             "fetched_at": candidate["fetched_at"],
+            "carried_by": carriers,
         },
         "dedupe": {
             "selected_key_type": selected_key_type,
@@ -1539,7 +1609,13 @@ class ArgusServer:
             baseline_source_ids = set() if prime else self._source_ids_requiring_baseline(cycle_sources, cycle_snapshot)
             self._store_source_health(run_id, now, output_dir)
             if prime:
-                self._store_normalized_storage(run_id, now, output_dir, None)
+                self._store_normalized_storage(
+                    run_id,
+                    now,
+                    output_dir,
+                    None,
+                    baseline_source_ids={source.id for source in cycle_sources if source.enabled},
+                )
                 self._mark_successful_source_baselines(run_id, now, source_health_rows)
                 self._write_decision_artifacts(run_id, output_dir)
                 summary["state"] = {
@@ -1558,7 +1634,13 @@ class ArgusServer:
                 package_candidates_path = output_dir / ".pre-package-candidates.jsonl"
                 package_candidate_rows = [json.loads(line) for line in package_candidates_path.read_text().splitlines() if line.strip()]
                 candidate_report_ids = {row["report_id"] for row in package_candidate_rows}
-                accepted_report_ids = self._store_normalized_storage(run_id, now, output_dir, candidate_report_ids)
+                accepted_report_ids = self._store_normalized_storage(
+                    run_id,
+                    now,
+                    output_dir,
+                    candidate_report_ids,
+                    baseline_source_ids=baseline_source_ids,
+                )
                 accepted_candidate_rows = []
                 seen_candidate_report_ids = set()
                 for row in package_candidate_rows:
@@ -2046,6 +2128,77 @@ class ArgusServer:
         )
         return failure
 
+    def _carried_by_for_candidate(self, run_id: str, candidate: Dict[str, Any]) -> List[Dict[str, Any]]:
+        carriers = [carrier_provenance_for_candidate(candidate)]
+        seen_carriers = {
+            (
+                candidate["source_id"],
+                candidate.get("feed_entry_id"),
+                candidate.get("canonical_url"),
+            )
+        }
+        if candidate.get("canonical_url"):
+            baseline_rows = self.connection.execute(
+                """
+                SELECT report_json
+                FROM normalized_reports
+                WHERE first_seen_run_id = ?
+                  AND canonical_url = ?
+                  AND source_id != ?
+                ORDER BY source_id, report_id
+                """,
+                (run_id, candidate["canonical_url"], candidate["source_id"]),
+            ).fetchall()
+            for row in baseline_rows:
+                report = json.loads(row["report_json"])
+                carrier = {
+                    "source_id": report.get("source_id"),
+                    "source_name": report.get("source_name"),
+                    "source_class": report.get("source_class"),
+                    "feed_url": report.get("feed_url"),
+                    "feed_guid": report.get("feed_entry_id"),
+                    "raw_url": report.get("raw_url"),
+                    "canonical_url": report.get("canonical_url"),
+                    "fetched_at": report.get("fetched_at"),
+                }
+                carrier_key = (carrier["source_id"], carrier["feed_guid"], carrier["canonical_url"])
+                if carrier_key not in seen_carriers:
+                    carriers.append(carrier)
+                    seen_carriers.add(carrier_key)
+        duplicate_rows = self.connection.execute(
+            """
+            SELECT detail_json
+            FROM dedupe_decisions
+            WHERE run_id = ?
+              AND decision = 'exact_duplicate'
+              AND duplicate_of_report_id = ?
+              AND duplicate_key_type = 'canonical_url'
+              AND duplicate_key_scope = 'global:canonical_url'
+            ORDER BY source_id, report_id
+            """,
+            (run_id, candidate["report_id"]),
+        ).fetchall()
+        for row in duplicate_rows:
+            detail = json.loads(row["detail_json"])
+            carriers.append(
+                {
+                    "source_id": detail.get("source_id"),
+                    "source_name": detail.get("source_name"),
+                    "source_class": detail.get("source_class"),
+                    "feed_url": detail.get("feed_url"),
+                    "feed_guid": detail.get("feed_entry_id"),
+                    "raw_url": detail.get("raw_url"),
+                    "canonical_url": detail.get("canonical_url"),
+                    "fetched_at": detail.get("fetched_at"),
+                }
+            )
+            carrier_key = (carriers[-1]["source_id"], carriers[-1]["feed_guid"], carriers[-1]["canonical_url"])
+            if carrier_key in seen_carriers:
+                carriers.pop()
+            else:
+                seen_carriers.add(carrier_key)
+        return carriers
+
     def _store_packages_and_publish(
         self,
         run_id: str,
@@ -2062,6 +2215,14 @@ class ArgusServer:
         publishable: List[Tuple[str, str, str, Dict[str, Any], Dict[str, Any], Dict[str, Any]]] = []
         queued_publish_keys: set[str] = set()
         rows = [json.loads(line) for line in candidates_path.read_text().splitlines() if line.strip()]
+        carriers_by_canonical_url: Dict[str, List[Dict[str, Any]]] = {}
+        for row in rows:
+            if row.get("canonical_url"):
+                carriers_by_canonical_url[row["canonical_url"]] = merge_carrier_lists(
+                    carriers_by_canonical_url.get(row["canonical_url"], []),
+                    [carrier_provenance_for_candidate(row)],
+                )
+        packaged_canonical_report_ids: Dict[str, str] = {}
         for candidate in rows:
             if self.reload_requested:
                 self.reload_requested = False
@@ -2099,7 +2260,55 @@ class ArgusServer:
                 continue
             if supplied_embeddings is None:
                 supplied_embeddings = {}
+            if candidate.get("canonical_url"):
+                candidate = {
+                    **candidate,
+                    "dedupe_identity": {"primary": "canonical_url", "value": candidate["canonical_url"]},
+                }
             candidate = {**candidate, "supplied_embeddings": [supplied_embeddings] if supplied_embeddings else []}
+            if candidate.get("canonical_url") in packaged_canonical_report_ids:
+                duplicate_key_hash = dedupe_key_hash("global:canonical_url", "canonical_url", candidate["canonical_url"])
+                detail = {
+                    "source_id": candidate["source_id"],
+                    "source_name": candidate["source_name"],
+                    "source_class": candidate["source_class"],
+                    "report_id": candidate["report_id"],
+                    "duplicate_of_report_id": packaged_canonical_report_ids[candidate["canonical_url"]],
+                    "duplicate_key_type": "canonical_url",
+                    "duplicate_key_scope": "global:canonical_url",
+                    "duplicate_key_hash": duplicate_key_hash,
+                    "duplicate_key_precedence": dedupe_key_precedence("canonical_url"),
+                    "reason": "exact_duplicate",
+                    "title": candidate["title"],
+                    "canonical_url": candidate["canonical_url"],
+                    "raw_url": candidate.get("raw_url"),
+                    "feed_url": candidate.get("provenance", {}).get("feed_url"),
+                    "feed_entry_id": candidate.get("feed_entry_id"),
+                    "published_at": candidate.get("published_at"),
+                    "fetched_at": candidate.get("fetched_at"),
+                }
+                self.connection.execute(
+                    "INSERT INTO skipped_items VALUES (?, ?, ?, ?, ?, ?)",
+                    (run_id, candidate["source_id"], candidate["report_id"], "exact_duplicate", json.dumps(detail, sort_keys=True), iso_z(now)),
+                )
+                self.connection.execute(
+                    "INSERT OR REPLACE INTO dedupe_decisions VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        run_id,
+                        candidate["report_id"],
+                        candidate["source_id"],
+                        "exact_duplicate",
+                        detail["duplicate_of_report_id"],
+                        "canonical_url",
+                        "global:canonical_url",
+                        duplicate_key_hash,
+                        dedupe_key_precedence("canonical_url"),
+                        candidate["canonical_url"].replace("\n", " ")[:160],
+                        "exact_duplicate",
+                        json.dumps(detail, sort_keys=True),
+                    ),
+                )
+                continue
             package_id = package_id_for(candidate)
             if supplied_embeddings:
                 self.connection.execute(
@@ -2124,7 +2333,11 @@ class ArgusServer:
                 not cycle_snapshot["require_embeddings"] or cycle_snapshot["allow_non_embedded_fallback"] or embedding_matches_snapshot(cycle_snapshot, supplied_embeddings)
             )
             publish_allowed = first_acceptance_allows_publish and bool(cycle_snapshot.get("publish_target_key"))
-            package_payload = package_payload_for(candidate, package_id)
+            carried_by = merge_carrier_lists(
+                self._carried_by_for_candidate(run_id, candidate),
+                carriers_by_canonical_url.get(candidate.get("canonical_url"), []),
+            )
+            package_payload = package_payload_for(candidate, package_id, carried_by)
             package_payloads.append(package_payload)
             self.connection.execute(
                 "INSERT OR IGNORE INTO packages VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
@@ -2140,6 +2353,8 @@ class ArgusServer:
                     iso_z(now),
                 ),
             )
+            if candidate.get("canonical_url"):
+                packaged_canonical_report_ids[candidate["canonical_url"]] = candidate["report_id"]
             if publish_allowed:
                 target = str(cycle_snapshot["publish_target_key"])
                 key = "sha256:" + hashlib.sha256(("publish:v0\n{}\n{}".format(package_id, target)).encode("utf-8")).hexdigest()
@@ -2544,8 +2759,16 @@ class ArgusServer:
             "last_delivery_error": dict(last_error) if last_error else None,
         }
 
-    def _store_normalized_storage(self, run_id: str, now: datetime, output_dir: Path, accepted_report_ids: Optional[set[str]]) -> set[str]:
+    def _store_normalized_storage(
+        self,
+        run_id: str,
+        now: datetime,
+        output_dir: Path,
+        accepted_report_ids: Optional[set[str]],
+        baseline_source_ids: Optional[set[str]] = None,
+    ) -> set[str]:
         sqlite_accepted_report_ids: set[str] = set()
+        baseline_source_ids = baseline_source_ids or set()
         rows = [json.loads(line) for line in (output_dir / "normalized-items.jsonl").read_text().splitlines() if line.strip()]
         skipped_path = output_dir / "skipped-items.json"
         skipped_payload = json.loads(skipped_path.read_text()) if skipped_path.exists() else []
@@ -2557,16 +2780,40 @@ class ArgusServer:
         rows.sort(key=lambda row: (row["source_id"], row.get("published_at") is None, row.get("published_at") or row.get("fetched_at") or "", row["report_id"]))
         for report in rows:
             key_type, key_scope, normalized_key_value, key_hash = selected_dedupe_key_for_report(report)
+            cross_key = cross_source_canonical_key_for_report(report)
+            owns_cross_key = cross_key is not None and report["source_id"] not in baseline_source_ids
             existing_report = self.connection.execute("SELECT report_id FROM normalized_reports WHERE report_id = ?", (report["report_id"],)).fetchone()
             existing_key = self.connection.execute(
                 "SELECT report_id FROM dedupe_keys WHERE key_type = ? AND key_scope = ? AND key_hash = ?",
                 (key_type, key_scope, key_hash),
             ).fetchone()
+            existing_cross_key = None
+            if cross_key is not None:
+                existing_cross_key = self.connection.execute(
+                    """
+                    SELECT dedupe_keys.report_id, normalized_reports.source_id, normalized_reports.first_seen_run_id
+                    FROM dedupe_keys
+                    JOIN normalized_reports ON normalized_reports.report_id = dedupe_keys.report_id
+                    WHERE dedupe_keys.key_type = ? AND dedupe_keys.key_scope = ? AND dedupe_keys.key_hash = ?
+                    """,
+                    (cross_key[0], cross_key[1], cross_key[3]),
+                ).fetchone()
             existing_seen_in_run = self.connection.execute(
                 "SELECT 1 FROM report_seen_runs WHERE report_id = ? AND run_id = ?",
                 (report["report_id"], run_id),
             ).fetchone()
             is_accepted = accepted_report_ids is None or report["report_id"] in accepted_report_ids
+            existing_cross_key_has_package = bool(
+                existing_cross_key
+                and self.connection.execute("SELECT 1 FROM packages WHERE report_id = ?", (existing_cross_key["report_id"],)).fetchone()
+            )
+            is_cross_source_url_duplicate = bool(
+                report["source_id"] not in baseline_source_ids
+                and existing_cross_key
+                and existing_cross_key["source_id"] != report["source_id"]
+                and existing_cross_key["first_seen_run_id"] != run_id
+                and existing_cross_key_has_package
+            )
             retry_failed_embedding = bool(
                 existing_report
                 and is_accepted
@@ -2584,6 +2831,8 @@ class ArgusServer:
             elif retry_failed_embedding:
                 decision = "seen_existing_report"
                 sqlite_accepted_report_ids.add(report["report_id"])
+            elif is_cross_source_url_duplicate:
+                decision = "exact_duplicate"
             elif existing_key and existing_seen_in_run:
                 decision = "exact_duplicate"
             elif existing_report:
@@ -2597,25 +2846,41 @@ class ArgusServer:
                 decision = str(preexisting_skips[report["report_id"]].get("reason_code") or "skipped_not_package_candidate")
             else:
                 decision = "skipped_not_package_candidate"
+            duplicate_of_report_id = existing_key["report_id"] if existing_key else None
+            duplicate_key_type = key_type
+            duplicate_key_scope = key_scope
+            duplicate_key_hash = key_hash
+            duplicate_key_value = normalized_key_value
+            if is_cross_source_url_duplicate and cross_key is not None:
+                duplicate_of_report_id = existing_cross_key["report_id"]
+                duplicate_key_type = cross_key[0]
+                duplicate_key_scope = cross_key[1]
+                duplicate_key_value = cross_key[2]
+                duplicate_key_hash = cross_key[3]
             if decision in {"exact_duplicate", "skipped_not_package_candidate", "missing_identity_key", "stale_by_freshness_window"}:
                 detail = preexisting_skips.get(report["report_id"], {}).get("detail") or {
                     "source_id": report["source_id"],
+                    "source_name": report["source_name"],
+                    "source_class": report["source_class"],
                     "report_id": report["report_id"],
-                    "duplicate_of_report_id": existing_key["report_id"] if existing_key else None,
-                    "duplicate_key_type": None if decision == "missing_identity_key" else key_type,
-                    "duplicate_key_scope": key_scope,
-                    "duplicate_key_hash": None if decision == "missing_identity_key" else key_hash,
-                    "duplicate_key_precedence": 1 if key_type == "feed_entry_id" else 2 if key_type == "canonical_url" else 3 if key_type == "normalized_title_date" else None,
+                    "duplicate_of_report_id": duplicate_of_report_id,
+                    "duplicate_key_type": None if decision == "missing_identity_key" else duplicate_key_type,
+                    "duplicate_key_scope": duplicate_key_scope,
+                    "duplicate_key_hash": None if decision == "missing_identity_key" else duplicate_key_hash,
+                    "duplicate_key_precedence": dedupe_key_precedence(duplicate_key_type),
                     "reason": decision,
                     "title": report["title"],
                     "canonical_url": report["canonical_url"],
+                    "raw_url": report.get("raw_url"),
+                    "feed_url": report.get("feed_url"),
                     "feed_entry_id": report.get("feed_entry_id"),
                     "published_at": report.get("published_at"),
+                    "fetched_at": report.get("fetched_at"),
                 }
-                detail.setdefault("duplicate_of_report_id", existing_key["report_id"] if existing_key else None)
-                detail.setdefault("duplicate_key_type", None if decision == "missing_identity_key" else key_type)
-                detail.setdefault("duplicate_key_hash", None if decision == "missing_identity_key" else key_hash)
-                detail.setdefault("duplicate_key_precedence", 1 if key_type == "feed_entry_id" else 2 if key_type == "canonical_url" else 3 if key_type == "normalized_title_date" else None)
+                detail.setdefault("duplicate_of_report_id", duplicate_of_report_id)
+                detail.setdefault("duplicate_key_type", None if decision == "missing_identity_key" else duplicate_key_type)
+                detail.setdefault("duplicate_key_hash", None if decision == "missing_identity_key" else duplicate_key_hash)
+                detail.setdefault("duplicate_key_precedence", dedupe_key_precedence(duplicate_key_type))
                 self.connection.execute(
                     "INSERT INTO skipped_items VALUES (?, ?, ?, ?, ?, ?)",
                     (run_id, report["source_id"], report["report_id"], decision, json.dumps(detail, sort_keys=True), iso_z(now)),
@@ -2629,10 +2894,10 @@ class ArgusServer:
                         decision,
                         detail["duplicate_of_report_id"],
                         detail["duplicate_key_type"],
-                        key_scope,
+                        duplicate_key_scope,
                         detail["duplicate_key_hash"],
                         detail["duplicate_key_precedence"],
-                        normalized_key_value.replace("\n", " ")[:160],
+                        duplicate_key_value.replace("\n", " ")[:160],
                         decision,
                         json.dumps(detail, sort_keys=True),
                     ),
@@ -2669,6 +2934,11 @@ class ArgusServer:
                 "INSERT OR IGNORE INTO dedupe_keys VALUES (?, ?, ?, ?, ?)",
                 (key_scope, key_type, key_hash, report["report_id"], normalized_key_value),
             )
+            if owns_cross_key:
+                self.connection.execute(
+                    "INSERT OR IGNORE INTO dedupe_keys VALUES (?, ?, ?, ?, ?)",
+                    (cross_key[1], cross_key[0], cross_key[3], report["report_id"], cross_key[2]),
+                )
             self.connection.execute(
                 "INSERT OR REPLACE INTO dedupe_decisions VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
@@ -2677,13 +2947,20 @@ class ArgusServer:
                     report["source_id"],
                     decision,
                     None,
-                    key_type,
-                    key_scope,
-                    key_hash,
-                    1 if key_type == "feed_entry_id" else 2 if key_type == "canonical_url" else 3,
-                    normalized_key_value.replace("\n", " ")[:160],
+                    cross_key[0] if owns_cross_key else key_type,
+                    cross_key[1] if owns_cross_key else key_scope,
+                    cross_key[3] if owns_cross_key else key_hash,
+                    dedupe_key_precedence(cross_key[0] if owns_cross_key else key_type),
+                    (cross_key[2] if owns_cross_key else normalized_key_value).replace("\n", " ")[:160],
                     decision,
-                    json.dumps({"key_hash": key_hash, "key_type": key_type}, sort_keys=True),
+                    json.dumps(
+                        {
+                            "key_hash": cross_key[3] if owns_cross_key else key_hash,
+                            "key_scope": cross_key[1] if owns_cross_key else key_scope,
+                            "key_type": cross_key[0] if owns_cross_key else key_type,
+                        },
+                        sort_keys=True,
+                    ),
                 ),
             )
         skipped_path = output_dir / "skipped-items.json"
@@ -3051,7 +3328,7 @@ def explain_skip(db_path: Path, run_id: str) -> Dict[str, Any]:
                     "normalized_value_preview": duplicate["duplicate_key_value_preview"],
                     "reason": duplicate["reason"],
                     "candidate": json.loads(duplicate["detail_json"]),
-                    "cross_source_note": "source-local exact dedupe only; cross-source overlap is not suppressed",
+                    "cross_source_note": "URL-first cross-source canonical URL dedupe; feed GUID dedupe remains source-scoped by default",
                 }
                 for duplicate in duplicate_rows
             ],

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import shutil
 import sqlite3
@@ -792,6 +793,73 @@ class ServerTests(unittest.TestCase):
             self.assertEqual({row["source_id"] for row in rows(root / "argus.sqlite3", "normalized_reports")}, {"stateful-source", "new-source"})
             self.assertEqual(len([row for row in rows(root / "argus.sqlite3", "packages") if row["created_run_id"] == summary["run_id"]]), 0)
             self.assertEqual(len(rows(root / "argus.sqlite3", "publish_attempts")), 0)
+
+    def test_active_baseline_source_does_not_own_cross_source_url_key_for_live_source(self):
+        with TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            path = write_config(root, publish={"mode": "inactive"})
+            feed_dir = root / "feeds"
+            config = yaml.safe_load(path.read_text())
+            (feed_dir / "zzz-existing.xml").write_text(
+                """<rss><channel><item><guid>old-existing</guid><title>Old existing</title><link>https://example.com/old-existing</link><pubDate>Wed, 29 Apr 2026 09:00:00 +0000</pubDate><description>Old.</description></item></channel></rss>"""
+            )
+            config["sources"] = [
+                {
+                    **config["sources"][0],
+                    "id": "zzz-existing",
+                    "display_name": "Existing Source",
+                    "feed_url": "https://fixture.invalid/zzz-existing.xml",
+                }
+            ]
+            path.write_text(yaml.safe_dump(config))
+            calls = []
+            original_post = server_module.post_message_to_subspace
+            server_module.post_message_to_subspace = fake_subspace_success(calls)
+            clock = FakeClock(NOW)
+            server = ArgusServer(path, clock=clock)
+            try:
+                server.tick()
+                (feed_dir / "aaa-new.xml").write_text(
+                    """<rss><channel><item><guid>shared-new</guid><title>Shared new source copy</title><link>https://example.com/shared?utm_source=new</link><pubDate>Wed, 29 Apr 2026 10:00:00 +0000</pubDate><description>Shared.</description></item></channel></rss>"""
+                )
+                (feed_dir / "zzz-existing.xml").write_text(
+                    """<rss><channel><item><guid>shared-existing</guid><title>Shared existing source copy</title><link>https://example.com/shared?utm_source=existing</link><pubDate>Wed, 29 Apr 2026 10:00:00 +0000</pubDate><description>Shared.</description></item></channel></rss>"""
+                )
+                config = yaml.safe_load(path.read_text())
+                config["publish"] = {
+                    "mode": "live",
+                    "subspace_endpoint": "https://subspace.invalid",
+                    "require_embeddings": True,
+                }
+                config["sources"] = [
+                    {
+                        **config["sources"][0],
+                        "id": "aaa-new",
+                        "display_name": "New Source",
+                        "feed_url": "https://fixture.invalid/aaa-new.xml",
+                    },
+                    {
+                        **config["sources"][0],
+                        "id": "zzz-existing",
+                        "display_name": "Existing Source",
+                        "feed_url": "https://fixture.invalid/zzz-existing.xml",
+                    },
+                ]
+                path.write_text(yaml.safe_dump(config))
+                server.reload()
+                clock.advance(3600)
+                exit_code, summary = server.manual_cycle()
+            finally:
+                server.close()
+                server_module.post_message_to_subspace = original_post
+            self.assertEqual(exit_code, 0)
+            self.assertEqual(summary["baseline_source_ids"], ["aaa-new"])
+            packages = [row for row in rows(root / "argus.sqlite3", "packages") if row["created_run_id"] == summary["run_id"]]
+            self.assertEqual(len(packages), 1)
+            package = json.loads(packages[0]["package_json"])
+            self.assertEqual(package["provenance"]["source_id"], "zzz-existing")
+            self.assertEqual({row["source_id"] for row in package["provenance"]["carried_by"]}, {"aaa-new", "zzz-existing"})
+            self.assertEqual(len(calls), 1)
 
     def test_blocked_active_reload_and_approved_active_forward_only(self):
         with TemporaryDirectory() as tmpdir:
@@ -1630,7 +1698,15 @@ print(json.dumps({
             self.assertFalse((run_dir / "digest.json").exists())
             self.assertEqual(len(rows(root / "argus.sqlite3", "normalized_reports")), 2)
             self.assertEqual(len(rows(root / "argus.sqlite3", "report_seen_runs")), 2)
-            self.assertEqual(len(rows(root / "argus.sqlite3", "dedupe_keys")), 2)
+            dedupe_key_rows = rows(root / "argus.sqlite3", "dedupe_keys")
+            self.assertEqual(len(dedupe_key_rows), 4)
+            self.assertEqual(
+                {(row["key_scope"], row["key_type"]) for row in dedupe_key_rows},
+                {
+                    ("source:stateful-source", "canonical_url"),
+                    ("global:canonical_url", "canonical_url"),
+                },
+            )
             self.assertEqual(len(rows(root / "argus.sqlite3", "dedupe_decisions")), 2)
             self.assertEqual(len(rows(root / "argus.sqlite3", "embeddings")), 2)
             self.assertEqual(len(rows(root / "argus.sqlite3", "packages")), 2)
@@ -1682,6 +1758,86 @@ print(json.dumps({
                 server.close()
             self.assertEqual(len(rows(root / "argus.sqlite3", "normalized_reports")), 2)
             self.assertEqual(len(rows(root / "argus.sqlite3", "packages")), 2)
+
+    def test_url_first_migration_backfills_canonical_keys_for_guid_first_rows(self):
+        with TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            path = write_config(root, publish={"mode": "inactive"})
+            config = load_runtime_config(path)
+            probe_dir = root / "probe"
+            run_pipeline_for_sources(
+                config.sources,
+                str(path),
+                probe_dir,
+                NOW,
+                fixture_dir=config.fixture_dir,
+                state_read=False,
+                state_write=False,
+            )
+            legacy_reports = []
+            for line in (probe_dir / "normalized-items.jsonl").read_text().splitlines():
+                report = json.loads(line)
+                old_identity_value = report["feed_entry_id"]
+                old_report_id = "sha256:" + hashlib.sha256(
+                    "report:v0\n{}\nfeed_entry_id\n{}".format(report["source_id"], old_identity_value).encode("utf-8")
+                ).hexdigest()
+                legacy_reports.append({**report, "report_id": old_report_id, "report_id_input_type": "feed_entry_id", "report_id_input_value": old_identity_value})
+            server = ArgusServer(path, clock=FakeClock(NOW))
+            server.close()
+            connection = sqlite3.connect(root / "argus.sqlite3")
+            try:
+                for idx, report in enumerate(legacy_reports):
+                    connection.execute(
+                        "INSERT INTO normalized_reports VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        (
+                            report["report_id"],
+                            report["source_id"],
+                            "legacy-run",
+                            "legacy-run",
+                            "feed_entry_id",
+                            "legacy-hash",
+                            report["feed_entry_id"],
+                            report["raw_url"],
+                            report["canonical_url"],
+                            report["title"].lower(),
+                            report["published_at"],
+                            report["fetched_at"],
+                            json.dumps(report, sort_keys=True),
+                            "accepted",
+                        ),
+                    )
+                    connection.execute(
+                        "INSERT INTO report_seen_runs VALUES (?, ?, ?, ?)",
+                        (report["report_id"], "legacy-run", report["source_id"], report["fetched_at"]),
+                    )
+                    key_hash = "sha256:" + hashlib.sha256(
+                        "dedupe:v0\nsource:{}\nfeed_entry_id\n{}".format(report["source_id"], report["feed_entry_id"]).encode("utf-8")
+                    ).hexdigest()
+                    connection.execute(
+                        "INSERT INTO dedupe_keys VALUES (?, ?, ?, ?, ?)",
+                        ("source:{}".format(report["source_id"]), "feed_entry_id", key_hash, report["report_id"], report["feed_entry_id"]),
+                    )
+                    connection.execute(
+                        "INSERT INTO accepted_reports VALUES (?, ?, ?, ?, ?)",
+                        (report["report_id"], "legacy-run", "inactive", "legacy-snapshot", report["fetched_at"]),
+                    )
+                    connection.execute(
+                        "INSERT INTO packages VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        ("legacy-package-{}".format(idx), report["report_id"], "1", None, None, 0, "{}", "legacy-run", report["fetched_at"]),
+                    )
+                connection.commit()
+            finally:
+                connection.close()
+            server = ArgusServer(path, clock=FakeClock(NOW))
+            try:
+                server.tick()
+            finally:
+                server.close()
+            self.assertEqual(len(rows(root / "argus.sqlite3", "packages")), 2)
+            self.assertEqual(
+                {row["decision"] for row in rows(root / "argus.sqlite3", "dedupe_decisions") if row["run_id"] != "legacy-run"},
+                {"exact_duplicate"},
+            )
 
     def test_post_pipeline_artifact_failure_records_failed_run(self):
         with TemporaryDirectory() as tmpdir:
@@ -1927,7 +2083,7 @@ print(json.dumps({
             stale_rows = [row for row in rows(root / "argus.sqlite3", "skipped_items") if row["reason_code"] == "stale_by_freshness_window"]
             self.assertEqual(len(stale_rows), 2)
 
-    def test_same_canonical_url_different_feed_ids_are_distinct_candidates(self):
+    def test_same_canonical_url_different_feed_ids_collapse_as_strong_evidence(self):
         with TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             path = write_config(root, publish={"mode": "inactive"})
@@ -1959,7 +2115,253 @@ print(json.dumps({
                 server.tick()
             finally:
                 server.close()
+            self.assertEqual(len(rows(root / "argus.sqlite3", "packages")), 1)
+            duplicate = next(row for row in rows(root / "argus.sqlite3", "dedupe_decisions") if row["decision"] == "exact_duplicate")
+            self.assertEqual(duplicate["duplicate_key_type"], "canonical_url")
+
+    def test_same_source_feed_guid_conflict_keeps_both_items_and_records_ambiguity(self):
+        with TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            path = write_config(root, publish={"mode": "inactive"})
+            fixture = root / "feeds" / "stateful-source.xml"
+            fixture.write_text(
+                """<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0">
+  <channel>
+    <title>Stateful Source</title>
+    <item>
+      <guid>ambiguous-guid</guid>
+      <title>First item</title>
+      <link>https://stateful.example/first</link>
+      <pubDate>Wed, 29 Apr 2026 10:00:00 +0000</pubDate>
+      <description>First item.</description>
+    </item>
+    <item>
+      <guid>ambiguous-guid</guid>
+      <title>Different item</title>
+      <link>https://stateful.example/different</link>
+      <pubDate>Wed, 29 Apr 2026 10:05:00 +0000</pubDate>
+      <description>Different item.</description>
+    </item>
+  </channel>
+</rss>"""
+            )
+            server = ArgusServer(path, clock=FakeClock(NOW))
+            try:
+                server.tick()
+            finally:
+                server.close()
             self.assertEqual(len(rows(root / "argus.sqlite3", "packages")), 2)
+            self.assertNotIn("exact_duplicate", {row["decision"] for row in rows(root / "argus.sqlite3", "dedupe_decisions")})
+            run_dir = next((root / "out" / "runs").glob("20260429T120000Z-scheduled-*"))
+            ambiguity = [
+                row for row in (json.loads(line) for line in (run_dir / "clusters.jsonl").read_text().splitlines() if line.strip())
+                if row.get("scope") == "source_local_ambiguity"
+            ]
+            self.assertEqual(len(ambiguity), 1)
+            self.assertEqual(ambiguity[0]["dedupe_reasons"], ["ambiguous_feed_entry_id"])
+
+    def test_same_canonical_url_across_sources_collapses_to_one_package_with_carrier_provenance(self):
+        with TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            path = write_config(root, publish={"mode": "inactive"})
+            feed_dir = root / "feeds"
+            (feed_dir / "nasa-a.xml").write_text(
+                """<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0">
+  <channel>
+    <title>NASA A</title>
+    <item>
+      <guid>nasa-a-guid</guid>
+      <title>Shared NASA story from A</title>
+      <link>https://science.nasa.gov/shared-story?utm_source=a</link>
+      <pubDate>Wed, 29 Apr 2026 10:00:00 +0000</pubDate>
+      <description>NASA A copy.</description>
+    </item>
+  </channel>
+</rss>"""
+            )
+            (feed_dir / "nasa-b.xml").write_text(
+                """<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0">
+  <channel>
+    <title>NASA B</title>
+    <item>
+      <guid>nasa-b-guid</guid>
+      <title>Shared NASA story from B</title>
+      <link>https://science.nasa.gov/shared-story?utm_source=b</link>
+      <pubDate>Wed, 29 Apr 2026 10:05:00 +0000</pubDate>
+      <description>NASA B copy.</description>
+    </item>
+  </channel>
+</rss>"""
+            )
+            config = yaml.safe_load(path.read_text())
+            config["sources"] = [
+                {
+                    "id": "nasa-a",
+                    "display_name": "NASA A",
+                    "source_class": "official",
+                    "feed_url": "https://fixture.invalid/nasa-a.xml",
+                    "site_url": "https://science.nasa.gov/",
+                    "adapter": "rss",
+                    "enabled": True,
+                    "freshness_window_hours": 72,
+                    "authority_score": 0.75,
+                },
+                {
+                    "id": "nasa-b",
+                    "display_name": "NASA B",
+                    "source_class": "official",
+                    "feed_url": "https://fixture.invalid/nasa-b.xml",
+                    "site_url": "https://science.nasa.gov/",
+                    "adapter": "rss",
+                    "enabled": True,
+                    "freshness_window_hours": 72,
+                    "authority_score": 0.75,
+                },
+            ]
+            path.write_text(yaml.safe_dump(config))
+            server = ArgusServer(path, clock=FakeClock(NOW))
+            try:
+                server.tick()
+            finally:
+                server.close()
+            packages = rows(root / "argus.sqlite3", "packages")
+            self.assertEqual(len(packages), 1)
+            package = json.loads(packages[0]["package_json"])
+            self.assertEqual(package["body"]["url"], "https://science.nasa.gov/shared-story")
+            self.assertEqual(package["dedupe"]["selected_key_type"], "canonical_url")
+            self.assertEqual(package["dedupe"]["selected_key_scope"], "global:canonical_url")
+            carried_by = package["provenance"]["carried_by"]
+            self.assertEqual({row["source_id"] for row in carried_by}, {"nasa-a", "nasa-b"})
+            self.assertEqual({row["feed_guid"] for row in carried_by}, {"nasa-a-guid", "nasa-b-guid"})
+            decisions = rows(root / "argus.sqlite3", "dedupe_decisions")
+            duplicate = next(row for row in decisions if row["decision"] == "exact_duplicate")
+            self.assertEqual(duplicate["duplicate_key_type"], "canonical_url")
+            self.assertEqual(duplicate["duplicate_key_scope"], "global:canonical_url")
+
+    def test_cross_source_url_duplicate_can_package_after_primary_embedding_failure(self):
+        with TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            failing_embedder = write_failing_embedder(root)
+            path = write_config(
+                root,
+                publish={"mode": "inactive"},
+                embedding={
+                    "backend": "cli",
+                    "command": str(failing_embedder),
+                    "provider": "cli",
+                    "model": "fixture",
+                    "dimensions": 1,
+                    "space_id": "fixture:1",
+                },
+            )
+            feed_dir = root / "feeds"
+            for source_id, guid in [("source-a", "guid-a"), ("source-b", "guid-b")]:
+                (feed_dir / "{}.xml".format(source_id)).write_text(
+                    """<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0">
+  <channel>
+    <item>
+      <guid>{}</guid>
+      <title>Shared story</title>
+      <link>https://shared.example/story</link>
+      <pubDate>Wed, 29 Apr 2026 10:00:00 +0000</pubDate>
+      <description>Shared.</description>
+    </item>
+  </channel>
+</rss>""".format(guid)
+                )
+            config = yaml.safe_load(path.read_text())
+            base_source = config["sources"][0]
+            config["sources"] = [
+                {**base_source, "id": "source-a", "display_name": "Source A", "feed_url": "https://fixture.invalid/source-a.xml"},
+                {**base_source, "id": "source-b", "display_name": "Source B", "feed_url": "https://fixture.invalid/source-b.xml"},
+            ]
+            path.write_text(yaml.safe_dump(config))
+            clock = FakeClock(NOW)
+            server = ArgusServer(path, clock=clock)
+            try:
+                server.tick()
+                self.assertEqual(len(rows(root / "argus.sqlite3", "packages")), 0)
+                good_embedder = write_fake_embedder(root)
+                config = yaml.safe_load(path.read_text())
+                config["embedding"] = {
+                    "backend": "cli",
+                    "command": str(good_embedder),
+                    "provider": "cli",
+                    "model": "fixture",
+                    "dimensions": 1,
+                    "space_id": "fixture:1",
+                }
+                path.write_text(yaml.safe_dump(config))
+                server.reload()
+                clock.advance(3600)
+                server.manual_cycle()
+            finally:
+                server.close()
+            packages = rows(root / "argus.sqlite3", "packages")
+            self.assertEqual(len(packages), 1)
+            package = json.loads(packages[0]["package_json"])
+            self.assertEqual({row["source_id"] for row in package["provenance"]["carried_by"]}, {"source-a", "source-b"})
+
+    def test_same_feed_guid_across_sources_does_not_cross_source_dedupe_without_matching_url(self):
+        with TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            path = write_config(root, publish={"mode": "inactive"})
+            feed_dir = root / "feeds"
+            for source_id, title, url in [
+                ("source-a", "Story A", "https://publisher-a.example/story"),
+                ("source-b", "Story B", "https://publisher-b.example/story"),
+            ]:
+                (feed_dir / "{}.xml".format(source_id)).write_text(
+                    """<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0">
+  <channel>
+    <item>
+      <guid>shared-guid</guid>
+      <title>{}</title>
+      <link>{}</link>
+      <pubDate>Wed, 29 Apr 2026 10:00:00 +0000</pubDate>
+      <description>{}</description>
+    </item>
+  </channel>
+</rss>""".format(title, url, title)
+                )
+            config = yaml.safe_load(path.read_text())
+            config["sources"] = [
+                {
+                    "id": "source-a",
+                    "display_name": "Source A",
+                    "source_class": "editorial",
+                    "feed_url": "https://fixture.invalid/source-a.xml",
+                    "site_url": "https://publisher-a.example/",
+                    "adapter": "rss",
+                    "enabled": True,
+                    "freshness_window_hours": 72,
+                    "authority_score": 0.75,
+                },
+                {
+                    "id": "source-b",
+                    "display_name": "Source B",
+                    "source_class": "editorial",
+                    "feed_url": "https://fixture.invalid/source-b.xml",
+                    "site_url": "https://publisher-b.example/",
+                    "adapter": "rss",
+                    "enabled": True,
+                    "freshness_window_hours": 72,
+                    "authority_score": 0.75,
+                },
+            ]
+            path.write_text(yaml.safe_dump(config))
+            server = ArgusServer(path, clock=FakeClock(NOW))
+            try:
+                server.tick()
+            finally:
+                server.close()
+            self.assertEqual(len(rows(root / "argus.sqlite3", "packages")), 2)
+            self.assertNotIn("exact_duplicate", {row["decision"] for row in rows(root / "argus.sqlite3", "dedupe_decisions")})
 
     def test_feed_identity_rerun_updates_seen_report_not_duplicate_report(self):
         with TemporaryDirectory() as tmpdir:

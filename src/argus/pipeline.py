@@ -502,10 +502,10 @@ def normalize_feed_entry_id(value: str) -> str:
 
 
 def report_identity_input(feed_entry_id: Optional[str], canonical_url: Optional[str], title: str, published_at: Optional[str]) -> Tuple[str, str]:
-    if feed_entry_id:
-        return "feed_entry_id", normalize_feed_entry_id(feed_entry_id)
     if canonical_url:
         return "canonical_url", canonical_url
+    if feed_entry_id:
+        return "feed_entry_id", normalize_feed_entry_id(feed_entry_id)
     if not normalize_title(title):
         return "missing_identity_key", ""
     return "normalized_title_date", "{}\n{}".format(normalize_title(title), date_bucket(published_at))
@@ -525,10 +525,10 @@ def dedupe_key(report: Dict[str, Any]) -> Tuple[str, str, str]:
     source_id = report["source_id"]
     if report.get("report_id_input_type") == "missing_identity_key":
         return source_id, "missing_identity_key", ""
-    if report.get("feed_entry_id"):
-        return source_id, "feed_entry_id", normalize_feed_entry_id(report["feed_entry_id"])
     if report.get("canonical_url"):
         return source_id, "canonical_url", report["canonical_url"]
+    if report.get("feed_entry_id"):
+        return source_id, "feed_entry_id", normalize_feed_entry_id(report["feed_entry_id"])
     return source_id, "normalized_title_date", "{}\n{}".format(normalize_title(report["title"]), date_bucket(report.get("published_at") or report.get("fetched_at")))
 
 
@@ -812,6 +812,7 @@ def run_pipeline_for_sources(
             entries = parse_feed(fetch_result.body or "", source)
             raw_entries += len(entries)
             seen: Dict[Tuple[str, str, str], Dict[str, Any]] = {}
+            seen_feed_guids: Dict[str, Dict[str, Any]] = {}
             source_clusters: List[Dict[str, Any]] = []
             normalized_count = 0
             emitted_count = 0
@@ -838,6 +839,33 @@ def run_pipeline_for_sources(
                     continue
                 normalized_rows.append(report)
                 normalized_count += 1
+                if report.get("feed_entry_id"):
+                    feed_guid_key = normalize_feed_entry_id(report["feed_entry_id"])
+                    existing_guid_report = seen_feed_guids.get(feed_guid_key)
+                    if existing_guid_report is None:
+                        seen_feed_guids[feed_guid_key] = report
+                    elif (
+                        existing_guid_report.get("canonical_url") != report.get("canonical_url")
+                        or normalize_title(existing_guid_report["title"]) != normalize_title(report["title"])
+                    ):
+                        source_clusters.append(
+                            {
+                                "schema_version": SCHEMA_VERSION,
+                                "cluster_id": cluster_id_for(source.id, "ambiguous_feed_entry_id", feed_guid_key),
+                                "scope": "source_local_ambiguity",
+                                "canonical_report_id": None,
+                                "source_id": source.id,
+                                "report_ids": [existing_guid_report["report_id"], report["report_id"]],
+                                "dedupe_reasons": ["ambiguous_feed_entry_id"],
+                                "feed_entry_id": feed_guid_key,
+                                "evidence": {
+                                    "existing_canonical_url": existing_guid_report.get("canonical_url"),
+                                    "candidate_canonical_url": report.get("canonical_url"),
+                                    "existing_title": existing_guid_report.get("title"),
+                                    "candidate_title": report.get("title"),
+                                },
+                            }
+                        )
                 if identity in seen:
                     duplicate_count += 1
                     cluster_id = cluster_id_for(source.id, identity[1], identity[2])
